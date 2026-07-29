@@ -56,5 +56,6 @@ class RequestContextMiddleware:
                     "method": scope["method"],
                     "status": status_code,
                     "elapsed_ms": round((perf_counter() - started) * 1000, 3),
+                    "backend_id": scope["state"].get("backend_id"),
                 },
             )

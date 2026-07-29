@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Sequence
 
-from az_ai_bff.backend import AIBackendClient, AIBackendRegistry, AllAIBackendsFailedError
+from az_ai_bff.backend import AIBackendClient, AIBackendError, AIBackendRegistry, AllAIBackendsFailedError
 from az_ai_bff.models import AIAnswer, ChatTurn
 
 
@@ -9,17 +9,19 @@ class ResponseSynthesizer:
     """Combines available provider answers into one provider-neutral answer."""
 
     def synthesize(self, answers: Sequence[AIAnswer]) -> AIAnswer:
-        return AIAnswer(
+        answer = AIAnswer(
             text="\n\n".join(answer.text for answer in answers),
             backend_id="multi",
             input_tokens=self._sum_tokens(answers, "input_tokens"),
             output_tokens=self._sum_tokens(answers, "output_tokens"),
         )
+        answer._backend_count = len(answers)
+        return answer
 
     @staticmethod
     def _sum_tokens(answers: Sequence[AIAnswer], field: str) -> int | None:
         values = [getattr(answer, field) for answer in answers]
-        return sum(value for value in values if value is not None) if any(value is not None for value in values) else None
+        return sum(values) if all(value is not None for value in values) else None
 
 
 class AIOrchestrator:
@@ -64,7 +66,7 @@ class AIOrchestrator:
         for result in results:
             if isinstance(result, AIAnswer):
                 answers.append(result)
-            elif not isinstance(result, Exception):
+            elif not isinstance(result, AIBackendError):
                 raise result
 
         if not answers:

@@ -7,7 +7,7 @@ from az_ai_bff.backend import (
 )
 from az_ai_bff.errors import APIError
 from az_ai_bff.models import ChatRequest, ChatResponse
-from az_ai_bff.token_management import TokenManager
+from az_ai_bff.token_management import TokenBudgetExceededError, TokenManager
 
 
 class ChatService:
@@ -16,9 +16,13 @@ class ChatService:
         self._token_manager = token_manager
 
     async def create_response(self, request: ChatRequest, request_id: str) -> ChatResponse:
-        prepared = self._token_manager.prepare(request.message) if self._token_manager else None
         try:
-            if prepared is None or not self._token_manager.enabled:
+            prepared = self._token_manager.prepare(request.message, request.context) if self._token_manager else None
+        except TokenBudgetExceededError as error:
+            raise APIError(400, "token_budget_exceeded", "The message exceeds the input token budget") from error
+
+        try:
+            if prepared is None:
                 answer = await self._backend.generate(request.message, request.conversation_id)
             else:
                 answer = await self._backend.generate(

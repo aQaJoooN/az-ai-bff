@@ -1,10 +1,27 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-RequiredText = Annotated[str, Field(min_length=1)]
+def _require_secret(value: SecretStr) -> SecretStr:
+    if not value.get_secret_value().strip():
+        raise ValueError("secret must not be empty")
+    return value
+
+
+RequiredText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+RequiredSecret = Annotated[SecretStr, AfterValidator(_require_secret)]
 
 
 class AIBackendSettings(BaseModel):
@@ -14,8 +31,9 @@ class AIBackendSettings(BaseModel):
 
     backend_url: AnyHttpUrl
     backend_model: RequiredText
-    backend_credential: SecretStr
+    backend_credential: RequiredSecret
     backend_id: RequiredText
+    backend_format: Literal["simple", "openai"] = "simple"
     enabled: bool = True
 
 
@@ -33,11 +51,12 @@ class Settings(BaseSettings):
     internal_port: int = Field(default=8000, ge=1, le=65535)
     trusted_proxy_addresses: list[RequiredText]
     allowed_extension_origins: list[AnyHttpUrl] = Field(default_factory=list)
-    access_credential: SecretStr
+    access_credential: RequiredSecret
     backend_url: AnyHttpUrl
     backend_model: RequiredText
-    backend_credential: SecretStr
+    backend_credential: RequiredSecret
     backend_id: RequiredText = "primary"
+    backend_format: Literal["simple", "openai"] = "simple"
     multi_ai_enabled: bool = False
     additional_backends: list[AIBackendSettings] = Field(default_factory=list)
     token_budget_enabled: bool = False
@@ -55,8 +74,10 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def require_unique_backend_ids(self) -> "Settings":
+    def validate_backends(self) -> "Settings":
         backend_ids = [self.backend_id, *(backend.backend_id for backend in self.additional_backends)]
         if len(backend_ids) != len(set(backend_ids)):
             raise ValueError("backend identifiers must be unique")
+        if self.multi_ai_enabled and not any(backend.enabled for backend in self.additional_backends):
+            raise ValueError("multi-AI mode requires an enabled additional backend")
         return self

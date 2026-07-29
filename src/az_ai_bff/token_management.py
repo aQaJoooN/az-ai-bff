@@ -10,6 +10,10 @@ from az_ai_bff.models import AIAnswer, ChatTurn
 logger = logging.getLogger("az_ai_bff.tokens")
 
 
+class TokenBudgetExceededError(ValueError):
+    """The user message cannot fit within the configured input budget."""
+
+
 @dataclass(frozen=True)
 class PreparedPrompt:
     context: tuple[ChatTurn, ...]
@@ -56,6 +60,9 @@ class TokenManager:
     def prepare(self, message: str, context: Sequence[ChatTurn] = ()) -> PreparedPrompt:
         if not self.enabled:
             return PreparedPrompt(tuple(context), None, None)
+        message_tokens = self.estimate_text(message)
+        if message_tokens > self.input_token_budget:
+            raise TokenBudgetExceededError("message exceeds the configured input token budget")
         fitted = self.fit_context(message, context)
         return PreparedPrompt(
             context=fitted,
@@ -71,7 +78,17 @@ class TokenManager:
             extra={
                 "request_id": request_id,
                 "backend_id": answer.backend_id,
-                "input_tokens": answer.input_tokens if answer.input_tokens is not None else estimated_input,
-                "output_tokens": answer.output_tokens,
+                "input_tokens": (
+                    answer.input_tokens
+                    if answer.input_tokens is not None
+                    else estimated_input * answer._backend_count
+                    if estimated_input is not None
+                    else None
+                ),
+                "output_tokens": (
+                    answer.output_tokens
+                    if answer.output_tokens is not None
+                    else self.estimate_text(answer.text)
+                ),
             },
         )

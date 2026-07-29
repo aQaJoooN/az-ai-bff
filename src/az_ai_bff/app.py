@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncIterator
+from typing import Annotated, Any, AsyncIterator
 
 import httpx
 from fastapi import Depends, FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 
 from az_ai_bff.backend import AIBackendRegistry
@@ -62,6 +63,7 @@ def create_app(
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
             504: {"model": ErrorResponse},
@@ -73,6 +75,19 @@ def create_app(
         request: Request,
         _: Annotated[None, Depends(require_access_credential)],
     ) -> ChatResponse:
-        return await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
+        response = await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
+        request.state.backend_id = response.backend_id
+        return response
 
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+            for path in schema.get("paths", {}).values():
+                for operation in path.values():
+                    if isinstance(operation, dict):
+                        operation.get("responses", {}).pop("422", None)
+            app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi
     return app

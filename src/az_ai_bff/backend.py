@@ -1,8 +1,8 @@
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Annotated, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from az_ai_bff.config import AIBackendSettings, Settings
 from az_ai_bff.models import AIAnswer, ChatTurn
@@ -41,12 +41,33 @@ class AIBackendClient(Protocol):
     ) -> AIAnswer: ...
 
 
+NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 class _ProviderResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    answer: str = Field(min_length=1)
+    answer: NonEmptyText
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+
+
+class _OpenAIMessage(BaseModel):
+    content: NonEmptyText
+
+
+class _OpenAIChoice(BaseModel):
+    message: _OpenAIMessage
+
+
+class _OpenAIUsage(BaseModel):
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+
+
+class _OpenAIResponse(BaseModel):
+    choices: list[_OpenAIChoice] = Field(min_length=1)
+    usage: _OpenAIUsage | None = None
 
 
 class HttpAIBackendClient:
@@ -56,6 +77,7 @@ class HttpAIBackendClient:
         self._model = settings.backend_model
         self._credential = settings.backend_credential.get_secret_value()
         self._backend_id = settings.backend_id
+        self._format = settings.backend_format
 
     @property
     def backend_id(self) -> str:
@@ -68,20 +90,11 @@ class HttpAIBackendClient:
         context: Sequence[ChatTurn] = (),
         output_token_limit: int | None = None,
     ) -> AIAnswer:
-        payload = {"model": self._model, "message": message}
-        if conversation_id is not None:
-            payload["conversation_id"] = conversation_id
-        if context:
-            payload["context"] = [turn.model_dump() for turn in context]
-        if output_token_limit is not None:
-            payload["max_output_tokens"] = output_token_limit
+        payload = self._build_payload(message, conversation_id, context, output_token_limit)
+        headers = {"Authorization": f"Bearer {self._credential}"} if self._credential else None
 
         try:
-            response = await self._client.post(
-                self._url,
-                json=payload,
-                headers={"Authorization": f"Bearer {self._credential}"},
-            )
+            response = await self._client.post(self._url, json=payload, headers=headers)
             response.raise_for_status()
         except httpx.TimeoutException as error:
             raise AIBackendTimeoutError from error
@@ -91,7 +104,17 @@ class HttpAIBackendClient:
             raise AIBackendRejectedError from error
 
         try:
-            provider_response = _ProviderResponse.model_validate(response.json())
+            data = response.json()
+            if self._format == "openai":
+                provider_response = _OpenAIResponse.model_validate(data)
+                usage = provider_response.usage
+                return AIAnswer(
+                    text=provider_response.choices[0].message.content,
+                    backend_id=self.backend_id,
+                    input_tokens=usage.prompt_tokens if usage else None,
+                    output_tokens=usage.completion_tokens if usage else None,
+                )
+            provider_response = _ProviderResponse.model_validate(data)
         except (ValueError, ValidationError) as error:
             raise AIBackendRejectedError from error
 
@@ -101,6 +124,34 @@ class HttpAIBackendClient:
             input_tokens=provider_response.input_tokens,
             output_tokens=provider_response.output_tokens,
         )
+
+    def _build_payload(
+        self,
+        message: str,
+        conversation_id: str | None,
+        context: Sequence[ChatTurn],
+        output_token_limit: int | None,
+    ) -> dict:
+        if self._format == "openai":
+            payload = {
+                "model": self._model,
+                "messages": [
+                    *(turn.model_dump() for turn in context),
+                    {"role": "user", "content": message},
+                ],
+            }
+            if output_token_limit is not None:
+                payload["max_tokens"] = output_token_limit
+            return payload
+
+        payload = {"model": self._model, "message": message}
+        if conversation_id is not None:
+            payload["conversation_id"] = conversation_id
+        if context:
+            payload["context"] = [turn.model_dump() for turn in context]
+        if output_token_limit is not None:
+            payload["max_output_tokens"] = output_token_limit
+        return payload
 
 
 class AIBackendRegistry:

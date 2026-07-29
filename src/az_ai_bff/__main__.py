@@ -2,10 +2,12 @@ import uvicorn
 
 from az_ai_bff.app import create_app
 from az_ai_bff.config import Settings
+from az_ai_bff.logging_config import configure_logging
 
 
 def main() -> None:
     """Run the service with proxy headers trusted only from configured addresses."""
+    configure_logging()
     settings = Settings()
     uvicorn.run(
         create_app(settings),

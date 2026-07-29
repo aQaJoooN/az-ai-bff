@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_serializer
 
 
 TrimmedText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -12,9 +12,19 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ChatTurn(APIModel):
+    role: Literal["user", "assistant", "system"]
+    content: MessageText
+
+
 class ChatRequest(APIModel):
     message: MessageText
     conversation_id: Identifier | None = None
+    context: list[ChatTurn] = Field(default_factory=list, max_length=100)
+
+    @model_serializer
+    def serialize(self) -> dict[str, str | None]:
+        return {"message": self.message, "conversation_id": self.conversation_id}
 
 
 class ChatResponse(APIModel):
@@ -35,12 +45,8 @@ class HealthResponse(APIModel):
 
 
 class AIAnswer(APIModel):
-    text: str
+    text: MessageText
     backend_id: str
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
-
-
-class ChatTurn(APIModel):
-    role: Literal["user", "assistant", "system"]
-    content: str
+    _backend_count: int = PrivateAttr(default=1)
