@@ -1,5 +1,4 @@
-version: '3.8'
-
+---
 services:
   az-ai-bff:
     image: ${DOCKER_IMAGE:-docker.io/aqajooon/az-ai-bff:latest}
@@ -19,7 +18,13 @@ services:
     networks:
       - az-ai-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -33,7 +38,7 @@ services:
       - "${NGINX_PORT:-80}:80"
       - "${NGINX_SSL_PORT:-443}:443"  # For HTTPS - REQUIRED for Azure DevOps HTTPS integration
     volumes:
-      - ${NGINX_CONFIG:-./nginx.conf}:/etc/nginx/nginx.conf:ro
+      - ${NGINX_CONFIG:-./nginx/nginx.conf}:/etc/nginx/nginx.conf:ro
       - ${NGINX_SSL_DIR:-./nginx/ssl}:/etc/nginx/ssl:ro
       - ${NGINX_LOG_DIR:-./nginx/logs}:/var/log/nginx
     depends_on:

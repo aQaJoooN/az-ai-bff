@@ -1,5 +1,4 @@
-version: '3.8'
-
+---
 services:
   az-ai-bff:
     build: .
@@ -26,7 +25,7 @@ services:
       - "80:80"
       - "443:443"  # For HTTPS - REQUIRED for Azure DevOps HTTPS integration
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro  # For SSL certificates - REQUIRED for HTTPS
       - ./nginx/logs:/var/log/nginx  # For nginx logs
     depends_on:
