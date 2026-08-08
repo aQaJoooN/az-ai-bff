@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   az-ai-bff:
-    image: ${DOCKER_IMAGE:-docker.io/yourusername/az-ai-bff:latest}
+    image: ${DOCKER_IMAGE:-docker.io/aqajooon/az-ai-bff:latest}
     container_name: az-ai-bff
     restart: unless-stopped
     environment:
