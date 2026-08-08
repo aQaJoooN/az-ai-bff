@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  az-ai-bff:
+    build: .
+    container_name: az-ai-bff
+    restart: unless-stopped
+    environment:
+      # These environment variables will override .env file
+      AZ_AI_BFF_INTERNAL_HOST: 0.0.0.0
+      AZ_AI_BFF_INTERNAL_PORT: 8000
+      AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES: '["nginx"]'  # Trust nginx as proxy
+      # Add other required environment variables here or use .env file
+    ports:
+      - "8000:8000"  # Expose for debugging if needed
+    volumes:
+      - ./.env:/app/.env:ro  # Mount .env file
+    networks:
+      - az-ai-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: az-ai-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"  # For HTTPS - REQUIRED for Azure DevOps HTTPS integration
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro  # For SSL certificates - REQUIRED for HTTPS
+      - ./nginx/logs:/var/log/nginx  # For nginx logs
+    depends_on:
+      - az-ai-bff
+    networks:
+      - az-ai-network
+
+networks:
+  az-ai-network:
+    driver: bridge

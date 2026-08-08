@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  az-ai-bff:
+    image: ${DOCKER_IMAGE:-docker.io/yourusername/az-ai-bff:latest}
+    container_name: az-ai-bff
+    restart: unless-stopped
+    environment:
+      # These will be loaded from .env file or environment variables
+      AZ_AI_BFF_INTERNAL_HOST: 0.0.0.0
+      AZ_AI_BFF_INTERNAL_PORT: 8000
+      AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES: '["nginx"]'
+    ports:
+      - "8000:8000"  # Exposed for debugging/monitoring
+    volumes:
+      - ${ENV_FILE:-./.env}:/app/.env:ro
+    env_file:
+      - ${ENV_FILE:-./.env}
+    networks:
+      - az-ai-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx:
+    image: nginx:alpine
+    container_name: az-ai-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+      - "${NGINX_SSL_PORT:-443}:443"  # For HTTPS - REQUIRED for Azure DevOps HTTPS integration
+    volumes:
+      - ${NGINX_CONFIG:-./nginx.conf}:/etc/nginx/nginx.conf:ro
+      - ${NGINX_SSL_DIR:-./nginx/ssl}:/etc/nginx/ssl:ro
+      - ${NGINX_LOG_DIR:-./nginx/logs}:/var/log/nginx
+    depends_on:
+      az-ai-bff:
+        condition: service_healthy
+    networks:
+      - az-ai-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  az-ai-network:
+    driver: bridge
