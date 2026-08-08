@@ -14,7 +14,12 @@ async def require_access_credential(
     request: Request,
     credential: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> None:
-    expected = request.app.state.settings.access_credential.get_secret_value().encode("utf-8")
+    access_credential = request.app.state.settings.access_credential
+    
+    if not access_credential or not access_credential.get_secret_value():
+        return
+    
+    expected = access_credential.get_secret_value().encode("utf-8")
     supplied = credential.credentials.encode("utf-8") if credential and credential.scheme.lower() == "bearer" else b""
     if not supplied or not compare_digest(supplied, expected):
         raise APIError(401, "unauthorized", "A valid bearer credential is required")

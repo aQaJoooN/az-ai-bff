@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 from pydantic import (
     AfterValidator,
@@ -14,14 +14,16 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _require_secret(value: SecretStr) -> SecretStr:
+def _validate_secret(value: Optional[SecretStr]) -> Optional[SecretStr]:
+    if value is None:
+        return None
     if not value.get_secret_value().strip():
-        raise ValueError("secret must not be empty")
+        return None
     return value
 
 
 RequiredText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-RequiredSecret = Annotated[SecretStr, AfterValidator(_require_secret)]
+OptionalSecret = Annotated[Optional[SecretStr], AfterValidator(_validate_secret)]
 
 
 class AIBackendSettings(BaseModel):
@@ -31,7 +33,7 @@ class AIBackendSettings(BaseModel):
 
     backend_url: AnyHttpUrl
     backend_model: RequiredText
-    backend_credential: RequiredSecret
+    backend_credential: OptionalSecret = None
     backend_id: RequiredText
     backend_format: Literal["simple", "openai"] = "simple"
     enabled: bool = True
@@ -51,10 +53,10 @@ class Settings(BaseSettings):
     internal_port: int = Field(default=8000, ge=1, le=65535)
     trusted_proxy_addresses: list[RequiredText]
     allowed_extension_origins: list[AnyHttpUrl] = Field(default_factory=list)
-    access_credential: RequiredSecret
+    access_credential: OptionalSecret = None
     backend_url: AnyHttpUrl
     backend_model: RequiredText
-    backend_credential: RequiredSecret
+    backend_credential: OptionalSecret = None
     backend_id: RequiredText = "primary"
     backend_format: Literal["simple", "openai"] = "simple"
     multi_ai_enabled: bool = False

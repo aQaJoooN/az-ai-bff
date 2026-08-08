@@ -11,6 +11,7 @@ VALID_SETTINGS = {
     "backend_model": "example-model",
     "backend_credential": "backend-secret",
     "response_timeout_seconds": 30,
+    "internal_port": 8000,
 }
 
 

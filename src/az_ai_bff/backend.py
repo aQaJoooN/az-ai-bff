@@ -75,7 +75,7 @@ class HttpAIBackendClient:
         self._client = client
         self._url = str(settings.backend_url)
         self._model = settings.backend_model
-        self._credential = settings.backend_credential.get_secret_value()
+        self._credential = settings.backend_credential.get_secret_value() if settings.backend_credential else ""
         self._backend_id = settings.backend_id
         self._format = settings.backend_format
 

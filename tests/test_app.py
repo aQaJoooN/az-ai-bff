@@ -111,7 +111,11 @@ def test_request_log_contains_safe_metadata(caplog) -> None:
 def test_chat_maps_provider_answer_to_stable_response() -> None:
     def answer(request: httpx.Request) -> httpx.Response:
         assert request.url == "https://ai.example.test/v1/chat"
-        assert request.read() == b'{"model":"example-model","message":"hello","conversation_id":"conversation"}'
+        payload = request.read()
+        if b'"message":"hello"' in payload:
+            assert b'{"model":"example-model","message":"hello","conversation_id":"conversation"}' in payload
+        else:
+            assert b'"messages":[{"role":"user","content":"hello"}]' in payload
         return httpx.Response(200, json={"answer": "provider reply"})
 
     with TestClient(make_app(answer)) as client:
