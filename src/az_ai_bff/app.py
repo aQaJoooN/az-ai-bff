@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from typing import Annotated, Any, AsyncIterator
 
 import httpx
@@ -16,6 +17,8 @@ from az_ai_bff.middleware import RequestContextMiddleware
 from az_ai_bff.models import AnalyzeRequest, AnalyzeResponse, ChatRequest, ChatResponse, ChatTurn, ErrorResponse, HealthResponse, UnsupportedResponse
 from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
+
+_analyze_logger = logging.getLogger("az_ai_bff.analyze")
 
 
 def create_app(
@@ -100,8 +103,6 @@ def create_app(
     ) -> AnalyzeResponse | UnsupportedResponse:
         request_id = request.state.request_id
 
-        # Role check — only "user" is supported at the route level (enforced by model),
-        # but kept explicit for future extensibility.
         if analyze_request.role != "user":
             raise APIError(400, "unsupported_role", "Only 'user' role is supported")
 
@@ -111,7 +112,6 @@ def create_app(
         if analyze_request.message == "azure build pipeline improvement":
             return UnsupportedResponse(request_id=request_id)
 
-        # message == "azure build pipeline error", type == "normal"
         fetcher = AzureDevOpsLogFetcher(request.app.state.http_client, resolved_settings.azure_token.get_secret_value())
         try:
             error_logs = await fetcher.fetch_error_logs(str(analyze_request.data))
@@ -122,9 +122,28 @@ def create_app(
         except BuildLogFetchError as exc:
             raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
 
-        # Build a ChatRequest-compatible call using the fetched logs as the message context.
-        # The error logs are sent as an OpenAI-style "messages" payload via the existing
-        # backend, with the original user message as the prompt.
+        line_count = error_logs.count("\n") + 1
+        char_count = len(error_logs)
+
+        _analyze_logger.info(
+            "analyze_fetched_log_content",
+            extra={
+                "request_id": request_id,
+                "build_id": str(analyze_request.data).split("buildId=")[-1],
+                "log_content": error_logs,
+            },
+        )
+
+        _analyze_logger.info(
+            "analyze_fetched_log_stats",
+            extra={
+                "request_id": request_id,
+                "build_id": str(analyze_request.data).split("buildId=")[-1],
+                "log_line_count": line_count,
+                "log_char_count": char_count,
+            },
+        )
+
         log_chat_request = ChatRequest(
             message=analyze_request.message,
             conversation_id=None,

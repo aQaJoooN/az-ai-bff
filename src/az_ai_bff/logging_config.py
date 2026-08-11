@@ -17,6 +17,9 @@ class JsonFormatter(logging.Formatter):
         "output_tokens",
         "build_url",
         "build_id",
+        "log_content",
+        "log_line_count",
+        "log_char_count",
     )
 
     def format(self, record: logging.LogRecord) -> str:
