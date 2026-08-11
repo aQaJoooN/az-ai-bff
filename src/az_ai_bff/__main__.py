@@ -15,6 +15,7 @@ def main() -> None:
         port=settings.internal_port,
         proxy_headers=True,
         forwarded_allow_ips=",".join(settings.trusted_proxy_addresses),
+        log_config=None,
     )
 
 
