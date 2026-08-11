@@ -72,12 +72,39 @@ python -m az_ai_bff
 # Health check
 curl http://localhost/health
 
-# Chat endpoint
+# Analyze a failed Azure DevOps build pipeline
+curl https://your-bff-host/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "message": "azure build pipeline error",
+    "data": "https://your-tfs/tfs/Collection/ProjectId/_build/results?buildId=12345",
+    "role": "user",
+    "type": "normal"
+  }'
+
+# Chat endpoint (generic AI chat)
 curl http://localhost/api/v1/chat \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{"message": "Hello"}'
 ```
+
+### Analyze endpoint logic
+
+`POST /api/v1/analyze` applies the following decision tree:
+
+| `role` | `type` | `message` | Result |
+|--------|--------|-----------|--------|
+| `user` | `super` | any | `{"answer": "unsupported"}` |
+| `user` | `normal` | `azure build pipeline improvement` | `{"answer": "unsupported"}` |
+| `user` | `normal` | `azure build pipeline error` | Fetches build logs → AI analysis |
+
+When processing `azure build pipeline error`, the service:
+1. Validates the `data` URL against your on-premise Azure DevOps using `AZ_AI_BFF_AZURE_TOKEN`
+2. Finds all failed tasks in the build timeline
+3. Fetches their logs and greps for `error` with 5 lines of context around each match
+4. Sends the extracted logs to the configured AI backend and returns the answer
 
 ## Documentation
 
@@ -93,7 +120,8 @@ curl http://localhost/api/v1/chat \
 
 ### Required environment variables (see `.env.example`):
 
-- `AZ_AI_BFF_ACCESS_CREDENTIAL` - Authentication token for API
+- `AZ_AI_BFF_AZURE_TOKEN` - **Required.** Personal Access Token (PAT) for your on-premise Azure DevOps / TFS server. Used by the `/api/v1/analyze` endpoint to fetch build logs.
+- `AZ_AI_BFF_ACCESS_CREDENTIAL` - Authentication token for the API (optional — leave empty to disable)
 - `AZ_AI_BFF_BACKEND_URL` - AI backend URL (e.g., OpenAI-compatible)
 - `AZ_AI_BFF_BACKEND_MODEL` - AI model name
 - `AZ_AI_BFF_BACKEND_CREDENTIAL` - Backend authentication token
@@ -116,6 +144,18 @@ The repository includes GitHub Actions workflow that:
 
 ```
 ├── src/az_ai_bff/           # Application source code
+│   ├── app.py               # Routes: /health, /api/v1/chat, /api/v1/analyze
+│   ├── analyze.py           # Azure DevOps log fetcher and error grep
+│   ├── backend.py           # AI backend HTTP client (simple + openai formats)
+│   ├── chat.py              # Chat service (orchestration + token management)
+│   ├── config.py            # Pydantic settings (AZ_AI_BFF_* env vars)
+│   ├── models.py            # Request/response Pydantic models
+│   ├── orchestration.py     # Multi-AI fan-out and response synthesis
+│   ├── security.py          # Bearer token auth
+│   ├── middleware.py        # Request ID propagation + structured logging
+│   ├── token_management.py  # Token budget estimation and context trimming
+│   ├── errors.py            # Centralized exception handlers
+│   └── logging_config.py   # JSON structured logging
 ├── tests/                   # Test suite
 ├── .github/workflows/       # GitHub Actions workflows
 ├── Dockerfile               # Docker build configuration

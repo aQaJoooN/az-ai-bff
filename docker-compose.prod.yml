@@ -9,6 +9,7 @@ services:
       AZ_AI_BFF_INTERNAL_HOST: 0.0.0.0
       AZ_AI_BFF_INTERNAL_PORT: 8000
       AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES: '["nginx"]'
+      AZ_AI_BFF_AZURE_TOKEN: ""  # PAT for on-prem Azure DevOps
     ports:
       - "8000:8000"  # Exposed for debugging/monitoring
     volumes:

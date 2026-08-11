@@ -57,16 +57,17 @@ For production, use the pre-built image from Docker Hub:
    ```bash
    # Docker image configuration
    DOCKER_IMAGE=docker.io/aqajooon/az-ai-bff:latest
-   
+
    # Application configuration
    AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES=["nginx"]
    AZ_AI_BFF_ACCESS_CREDENTIAL=your_production_access_token
+   AZ_AI_BFF_AZURE_TOKEN=your-azure-devops-pat          # Required PAT for on-prem TFS/Azure DevOps
    AZ_AI_BFF_BACKEND_URL=http://your-production-ai-backend
    AZ_AI_BFF_BACKEND_MODEL=your-model-name
    AZ_AI_BFF_BACKEND_CREDENTIAL=your-backend-token
    AZ_AI_BFF_BACKEND_FORMAT=openai
    AZ_AI_BFF_RESPONSE_TIMEOUT_SECONDS=30
-   
+
    # Nginx configuration (optional)
    NGINX_PORT=80
    NGINX_SSL_PORT=443
@@ -90,6 +91,7 @@ DOCKER_IMAGE=docker.io/aqajooon/az-ai-bff:latest
 # Application Configuration
 AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES=["nginx"]
 AZ_AI_BFF_ACCESS_CREDENTIAL=your_access_token
+AZ_AI_BFF_AZURE_TOKEN=your-azure-devops-pat
 AZ_AI_BFF_BACKEND_URL=http://your-ai-backend-url
 AZ_AI_BFF_BACKEND_MODEL=your-model-name
 AZ_AI_BFF_BACKEND_CREDENTIAL=your-backend-token
@@ -184,11 +186,12 @@ volumes:
 
 ## Troubleshooting
 
-1. **Service won't start:** Check `.env` file exists and has all required variables
+1. **Service won't start:** Check `.env` file exists and has all required variables — including `AZ_AI_BFF_AZURE_TOKEN`
 2. **Connection refused:** Verify BFF service is running inside container
 3. **Authentication errors:** Ensure `AZ_AI_BFF_ACCESS_CREDENTIAL` matches the token in requests
 4. **Backend connection errors:** Check `AZ_AI_BFF_BACKEND_URL` and network connectivity
 5. **Nginx 502 errors:** BFF service might not be running or health check failing
+6. **Analyze 502 azure_auth_error:** `AZ_AI_BFF_AZURE_TOKEN` is invalid or lacks Build read permissions
 
 ## Production Considerations
 
@@ -233,7 +236,8 @@ For local development and testing:
 - **Nginx (Reverse Proxy):** http://localhost:${NGINX_PORT:-80}
 - **Direct BFF Service:** http://localhost:8000 (for debugging/monitoring)
 - **Health Check:** http://localhost:${NGINX_PORT:-80}/health
-- **API Endpoint:** http://localhost:${NGINX_PORT:-80}/api/v1/chat
+- **Analyze Endpoint:** http://localhost:${NGINX_PORT:-80}/api/v1/analyze
+- **Chat Endpoint:** http://localhost:${NGINX_PORT:-80}/api/v1/chat
 
 ## Management
 
@@ -312,6 +316,7 @@ docker inspect --format='{{.State.Health.Status}}' az-ai-nginx
 4. **Authentication errors:**
    - Verify `AZ_AI_BFF_ACCESS_CREDENTIAL` matches the token in requests
    - Check `AZ_AI_BFF_BACKEND_CREDENTIAL` if backend requires authentication
+   - Verify `AZ_AI_BFF_AZURE_TOKEN` is a valid PAT with **Read** permissions on Build for your Azure DevOps project
 
 5. **Backend connection errors:**
    ```bash

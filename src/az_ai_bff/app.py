@@ -6,13 +6,14 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 
+from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError
 from az_ai_bff.backend import AIBackendRegistry
 from az_ai_bff.chat import ChatService
 from az_ai_bff.config import Settings
 from az_ai_bff.orchestration import AIOrchestrator
-from az_ai_bff.errors import install_exception_handlers
+from az_ai_bff.errors import APIError, install_exception_handlers
 from az_ai_bff.middleware import RequestContextMiddleware
-from az_ai_bff.models import ChatRequest, ChatResponse, ErrorResponse, HealthResponse
+from az_ai_bff.models import AnalyzeRequest, AnalyzeResponse, ChatRequest, ChatResponse, ChatTurn, ErrorResponse, HealthResponse, UnsupportedResponse
 from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
 
@@ -78,6 +79,65 @@ def create_app(
         response = await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
         request.state.backend_id = response.backend_id
         return response
+
+    @app.post(
+        "/api/v1/analyze",
+        response_model=AnalyzeResponse | UnsupportedResponse,
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+            504: {"model": ErrorResponse},
+        },
+        tags=["analyze"],
+    )
+    async def analyze(
+        analyze_request: AnalyzeRequest,
+        request: Request,
+        _: Annotated[None, Depends(require_access_credential)],
+    ) -> AnalyzeResponse | UnsupportedResponse:
+        request_id = request.state.request_id
+
+        # Role check — only "user" is supported at the route level (enforced by model),
+        # but kept explicit for future extensibility.
+        if analyze_request.role != "user":
+            raise APIError(400, "unsupported_role", "Only 'user' role is supported")
+
+        if analyze_request.type == "super":
+            return UnsupportedResponse(request_id=request_id)
+
+        if analyze_request.message == "azure build pipeline improvement":
+            return UnsupportedResponse(request_id=request_id)
+
+        # message == "azure build pipeline error", type == "normal"
+        fetcher = AzureDevOpsLogFetcher(request.app.state.http_client, resolved_settings.azure_token.get_secret_value())
+        try:
+            error_logs = await fetcher.fetch_error_logs(str(analyze_request.data))
+        except BuildURLParseError as exc:
+            raise APIError(400, "invalid_build_url", str(exc)) from exc
+        except AzureAuthError as exc:
+            raise APIError(502, "azure_auth_error", str(exc)) from exc
+        except BuildLogFetchError as exc:
+            raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
+
+        # Build a ChatRequest-compatible call using the fetched logs as the message context.
+        # The error logs are sent as an OpenAI-style "messages" payload via the existing
+        # backend, with the original user message as the prompt.
+        log_chat_request = ChatRequest(
+            message=analyze_request.message,
+            conversation_id=None,
+            context=[
+                ChatTurn(
+                    role="user",
+                    content=error_logs[:32_768],  # respect model max_length
+                )
+            ],
+        )
+        ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
+        request.state.backend_id = ai_response.backend_id
+        return AnalyzeResponse(answer=ai_response.answer, request_id=request_id)
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is None:

@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_serializer
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_serializer
 
 
 TrimmedText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -50,3 +50,20 @@ class AIAnswer(APIModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     _backend_count: int = PrivateAttr(default=1)
+
+
+class AnalyzeRequest(APIModel):
+    message: Literal["azure build pipeline error", "azure build pipeline improvement"]
+    data: AnyHttpUrl
+    role: Literal["user"]
+    type: Literal["normal", "super"]
+
+
+class AnalyzeResponse(APIModel):
+    answer: str
+    request_id: str
+
+
+class UnsupportedResponse(APIModel):
+    answer: Literal["unsupported"] = "unsupported"
+    request_id: str

@@ -21,6 +21,7 @@ def make_app(handler=None):
         backend_model="example-model",
         backend_credential="backend-secret",
         response_timeout_seconds=30,
+        azure_token="test-azure-pat",
     )
     if handler is None:
         handler = lambda _: httpx.Response(503)

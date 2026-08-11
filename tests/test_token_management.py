@@ -25,6 +25,7 @@ def settings(**overrides) -> Settings:
         "input_token_budget": 2,
         "output_token_limit": 7,
         "token_characters_per_token": 4,
+        "azure_token": "test-azure-pat",
     }
     values.update(overrides)
     return Settings(**values)

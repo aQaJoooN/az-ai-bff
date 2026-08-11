@@ -18,6 +18,7 @@ def settings() -> Settings:
         backend_model="example-model",
         backend_credential="backend-secret",
         response_timeout_seconds=30,
+        azure_token="test-azure-pat",
     )
 
 

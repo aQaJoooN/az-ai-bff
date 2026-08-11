@@ -9,6 +9,7 @@ services:
       AZ_AI_BFF_INTERNAL_HOST: 0.0.0.0
       AZ_AI_BFF_INTERNAL_PORT: 8000
       AZ_AI_BFF_TRUSTED_PROXY_ADDRESSES: '["nginx"]'  # Trust nginx as proxy
+      AZ_AI_BFF_AZURE_TOKEN: ""  # PAT for on-prem Azure DevOps
       # Add other required environment variables here or use .env file
     ports:
       - "8000:8000"  # Expose for debugging if needed

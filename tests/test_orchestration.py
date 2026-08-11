@@ -17,6 +17,7 @@ def settings() -> Settings:
         backend_credential="primary-secret",
         backend_id="primary",
         response_timeout_seconds=30,
+        azure_token="test-azure-pat",
         multi_ai_enabled=True,
         additional_backends=[{
             "backend_url": "https://secondary.example.test/chat",
