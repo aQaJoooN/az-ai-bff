@@ -145,13 +145,22 @@ def create_app(
         )
 
         log_chat_request = ChatRequest(
-            message=analyze_request.message,
+            message=error_logs[:32_768],
             conversation_id=None,
             context=[
                 ChatTurn(
-                    role="user",
-                    content=error_logs[:32_768],  # respect model max_length
-                )
+                    role="system",
+                    content=(
+                        "You are an expert Azure DevOps and CI/CD build engineer. "
+                        "Analyze the provided build pipeline error log and respond in exactly three clearly labeled sections:\n\n"
+                        "## Problem (35%)\n"
+                        "Explain what went wrong and why. Identify the root cause from the log.\n\n"
+                        "## Solution (60%)\n"
+                        "Provide concrete, step-by-step actions to fix the problem. Be specific — include commands, config changes, or settings where relevant.\n\n"
+                        "## Summary (5%)\n"
+                        "One or two sentences summarizing the issue and the fix."
+                    ),
+                ),
             ],
         )
         ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
