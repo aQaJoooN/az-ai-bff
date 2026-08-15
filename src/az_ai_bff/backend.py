@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Sequence
 from typing import Annotated, Protocol
 
@@ -6,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from az_ai_bff.config import AIBackendSettings, Settings
 from az_ai_bff.models import AIAnswer, ChatTurn
+
+logger = logging.getLogger("az_ai_bff.backend")
 
 
 class AIBackendError(Exception):
@@ -53,11 +56,12 @@ class _ProviderResponse(BaseModel):
 
 
 class _OpenAIMessage(BaseModel):
-    content: NonEmptyText
+    content: str | None = None  # nullable when model is cut off at max_tokens
 
 
 class _OpenAIChoice(BaseModel):
     message: _OpenAIMessage
+    finish_reason: str | None = None
 
 
 class _OpenAIUsage(BaseModel):
@@ -110,14 +114,36 @@ class HttpAIBackendClient:
             if self._format == "openai":
                 provider_response = _OpenAIResponse.model_validate(data)
                 usage = provider_response.usage
+                content = provider_response.choices[0].message.content
+                if not content or not content.strip():
+                    logger.warning(
+                        "backend_empty_content",
+                        extra={
+                            "backend_id": self._backend_id,
+                            "finish_reason": provider_response.choices[0].finish_reason,
+                            "raw_response": str(data)[:500],
+                        },
+                    )
+                    raise AIBackendRejectedError("AI backend returned empty content")
                 return AIAnswer(
-                    text=provider_response.choices[0].message.content,
+                    text=content,
                     backend_id=self.backend_id,
                     input_tokens=usage.prompt_tokens if usage else None,
                     output_tokens=usage.completion_tokens if usage else None,
                 )
             provider_response = _ProviderResponse.model_validate(data)
+        except AIBackendRejectedError:
+            raise
         except (ValueError, ValidationError) as error:
+            logger.warning(
+                "backend_parse_error",
+                extra={
+                    "backend_id": self._backend_id,
+                    "format": self._format,
+                    "raw_response": str(data)[:500] if "data" in dir() else "could not decode JSON",
+                    "error": str(error),
+                },
+            )
             raise AIBackendRejectedError from error
 
         return AIAnswer(

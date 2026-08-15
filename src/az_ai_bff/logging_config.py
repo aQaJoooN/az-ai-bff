@@ -20,6 +20,9 @@ class JsonFormatter(logging.Formatter):
         "log_content",
         "log_line_count",
         "log_char_count",
+        "finish_reason",
+        "raw_response",
+        "error",
     )
 
     def format(self, record: logging.LogRecord) -> str:
