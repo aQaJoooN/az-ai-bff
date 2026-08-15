@@ -36,6 +36,7 @@ class AIBackendSettings(BaseModel):
     backend_credential: OptionalSecret = None
     backend_id: RequiredText
     backend_format: Literal["simple", "openai"] = "simple"
+    backend_reasoning_mode: bool = False
     enabled: bool = True
 
 

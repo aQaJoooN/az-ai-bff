@@ -83,7 +83,7 @@ class HttpAIBackendClient:
         self._credential = settings.backend_credential.get_secret_value() if settings.backend_credential else ""
         self._backend_id = settings.backend_id
         self._format = settings.backend_format
-        self._reasoning_mode: bool = getattr(settings, "backend_reasoning_mode", False)
+        self._reasoning_mode: bool = settings.backend_reasoning_mode
         # Global max_tokens cap — only available on the top-level Settings, not per-backend
         self._max_tokens: int | None = getattr(settings, "max_tokens", None)
 

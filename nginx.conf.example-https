@@ -96,8 +96,8 @@ http {
             proxy_set_header X-Request-ID $request_id;
             
             proxy_connect_timeout 30s;
-            proxy_read_timeout 60s;
-            proxy_send_timeout 60s;
+            proxy_read_timeout 630s;
+            proxy_send_timeout 630s;
             
             # Buffering settings
             proxy_buffering on;
