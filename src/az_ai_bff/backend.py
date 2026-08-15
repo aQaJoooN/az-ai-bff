@@ -78,6 +78,8 @@ class HttpAIBackendClient:
         self._credential = settings.backend_credential.get_secret_value() if settings.backend_credential else ""
         self._backend_id = settings.backend_id
         self._format = settings.backend_format
+        # Global max_tokens cap — only available on the top-level Settings, not per-backend
+        self._max_tokens: int | None = getattr(settings, "max_tokens", None)
 
     @property
     def backend_id(self) -> str:
@@ -132,6 +134,9 @@ class HttpAIBackendClient:
         context: Sequence[ChatTurn],
         output_token_limit: int | None,
     ) -> dict:
+        # Resolve the token limit: explicit caller value takes priority, then global cap
+        effective_limit = output_token_limit if output_token_limit is not None else self._max_tokens
+
         if self._format == "openai":
             payload = {
                 "model": self._model,
@@ -140,8 +145,8 @@ class HttpAIBackendClient:
                     {"role": "user", "content": message},
                 ],
             }
-            if output_token_limit is not None:
-                payload["max_tokens"] = output_token_limit
+            if effective_limit is not None:
+                payload["max_tokens"] = effective_limit
             return payload
 
         payload = {"model": self._model, "message": message}
@@ -149,8 +154,8 @@ class HttpAIBackendClient:
             payload["conversation_id"] = conversation_id
         if context:
             payload["context"] = [turn.model_dump() for turn in context]
-        if output_token_limit is not None:
-            payload["max_output_tokens"] = output_token_limit
+        if effective_limit is not None:
+            payload["max_output_tokens"] = effective_limit
         return payload
 
 
