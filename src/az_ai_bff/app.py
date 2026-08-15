@@ -126,15 +126,6 @@ def create_app(
         char_count = len(error_logs)
 
         _analyze_logger.info(
-            "analyze_fetched_log_content",
-            extra={
-                "request_id": request_id,
-                "build_id": str(analyze_request.data).split("buildId=")[-1],
-                "log_content": error_logs,
-            },
-        )
-
-        _analyze_logger.info(
             "analyze_fetched_log_stats",
             extra={
                 "request_id": request_id,
