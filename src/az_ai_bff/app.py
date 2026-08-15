@@ -152,12 +152,13 @@ def create_app(
                     role="system",
                     content=(
                         "You are an expert Azure DevOps and CI/CD build engineer. "
-                        "Analyze the provided build pipeline error log and respond in exactly three clearly labeled sections:\n\n"
-                        "## Problem (35%)\n"
+                        "Analyze the provided build pipeline error log and respond in exactly three clearly labeled sections. "
+                        "Allocate your response as follows: ~35% explaining the problem, ~60% explaining the solution, ~5% for the summary.\n\n"
+                        "## Problem\n"
                         "Explain what went wrong and why. Identify the root cause from the log.\n\n"
-                        "## Solution (60%)\n"
+                        "## Solution\n"
                         "Provide concrete, step-by-step actions to fix the problem. Be specific — include commands, config changes, or settings where relevant.\n\n"
-                        "## Summary (5%)\n"
+                        "## Summary\n"
                         "One or two sentences summarizing the issue and the fix."
                     ),
                 ),
