@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     backend_credential: OptionalSecret = None
     backend_id: RequiredText = "primary"
     backend_format: Literal["simple", "openai"] = "simple"
+    backend_reasoning_mode: bool = False  # set true for reasoning models that respond in reasoning_content
     multi_ai_enabled: bool = False
     additional_backends: list[AIBackendSettings] = Field(default_factory=list)
     token_budget_enabled: bool = False

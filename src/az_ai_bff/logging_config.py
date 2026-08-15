@@ -23,6 +23,7 @@ class JsonFormatter(logging.Formatter):
         "finish_reason",
         "raw_response",
         "error",
+        "hint",
     )
 
     def format(self, record: logging.LogRecord) -> str:

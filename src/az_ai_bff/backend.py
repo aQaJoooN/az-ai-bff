@@ -56,7 +56,8 @@ class _ProviderResponse(BaseModel):
 
 
 class _OpenAIMessage(BaseModel):
-    content: str | None = None  # nullable when model is cut off at max_tokens
+    content: str | None = None           # final answer; empty on reasoning models if max_tokens too low
+    reasoning_content: str | None = None  # chain-of-thought on reasoning models (DeepSeek, Qwen3, etc.)
 
 
 class _OpenAIChoice(BaseModel):
@@ -82,6 +83,7 @@ class HttpAIBackendClient:
         self._credential = settings.backend_credential.get_secret_value() if settings.backend_credential else ""
         self._backend_id = settings.backend_id
         self._format = settings.backend_format
+        self._reasoning_mode: bool = getattr(settings, "backend_reasoning_mode", False)
         # Global max_tokens cap — only available on the top-level Settings, not per-backend
         self._max_tokens: int | None = getattr(settings, "max_tokens", None)
 
@@ -114,17 +116,39 @@ class HttpAIBackendClient:
             if self._format == "openai":
                 provider_response = _OpenAIResponse.model_validate(data)
                 usage = provider_response.usage
-                content = provider_response.choices[0].message.content
+                choice = provider_response.choices[0]
+
+                # In reasoning_mode the model always puts its answer in reasoning_content
+                # (content is empty by design). Outside reasoning_mode, reasoning_content
+                # is used as a silent fallback only when content is unexpectedly empty.
+                if self._reasoning_mode:
+                    content = choice.message.reasoning_content or choice.message.content
+                else:
+                    content = choice.message.content
+                    if not content or not content.strip():
+                        reasoning = choice.message.reasoning_content
+                        if reasoning and reasoning.strip():
+                            logger.warning(
+                                "backend_used_reasoning_content",
+                                extra={
+                                    "backend_id": self._backend_id,
+                                    "finish_reason": choice.finish_reason,
+                                    "hint": "content empty — set AZ_AI_BFF_BACKEND_REASONING_MODE=true if this model always uses reasoning_content",
+                                },
+                            )
+                            content = reasoning
+
                 if not content or not content.strip():
                     logger.warning(
                         "backend_empty_content",
                         extra={
                             "backend_id": self._backend_id,
-                            "finish_reason": provider_response.choices[0].finish_reason,
+                            "finish_reason": choice.finish_reason,
                             "raw_response": str(data)[:500],
                         },
                     )
                     raise AIBackendRejectedError("AI backend returned empty content")
+
                 return AIAnswer(
                     text=content,
                     backend_id=self.backend_id,
