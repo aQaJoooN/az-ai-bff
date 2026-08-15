@@ -9,14 +9,21 @@ import httpx
 
 logger = logging.getLogger("az_ai_bff.analyze")
 
-# Matches on-prem TFS/AzureDevOps build result URLs:
-# https://host/tfs/<collection>/<project-guid>/_build/results?buildId=<id>
-_BUILD_URL_RE = re.compile(
-    r"^https?://[^/]+"           # scheme + host
-    r"(?:/tfs/[^/]+)?"           # optional /tfs/<collection>
-    r"/(?P<project>[^/]+)"       # project GUID or name
-    r"/_build/results"
-    r"(?:\?.*buildId=(?P<build_id>\d+))?",
+# Matches on-prem TFS/AzureDevOps build result URLs — two accepted formats:
+#   1. UI URL:  https://host/tfs/<collection>/<project>/_build/results?buildId=<id>
+#   2. API URL: https://host/tfs/<collection>/<project>/_apis/build/builds/<id>
+_BUILD_UI_RE = re.compile(
+    r"^https?://[^/]+"
+    r"(?:/tfs/[^/]+)?"
+    r"/(?P<project>[^/]+)"
+    r"/_build/results",
+    re.IGNORECASE,
+)
+_BUILD_API_RE = re.compile(
+    r"^https?://[^/]+"
+    r"(?:/tfs/[^/]+)?"
+    r"/(?P<project>[^/]+)"
+    r"/_apis/build/builds/(?P<build_id>\d+)",
     re.IGNORECASE,
 )
 
@@ -42,30 +49,50 @@ class ParsedBuildURL(NamedTuple):
 
 
 def parse_build_url(url: str) -> ParsedBuildURL:
-    """Extract base_url, project and build_id from a TFS/AzureDevOps build URL."""
+    """Extract base_url, project and build_id from a TFS/AzureDevOps build URL.
+
+    Accepts two formats:
+    - UI:  https://host/tfs/Collection/project/_build/results?buildId=123
+    - API: https://host/tfs/Collection/project/_apis/build/builds/123
+    """
     parsed = urlparse(url)
+    path_parts = parsed.path.split("/")
+
+    # Try API URL format first: /_apis/build/builds/<id>
+    api_match = _BUILD_API_RE.match(url)
+    if api_match:
+        project = api_match.group("project")
+        build_id = api_match.group("build_id")
+        try:
+            proj_idx = path_parts.index(project)
+        except ValueError:
+            raise BuildURLParseError(f"Cannot locate project segment in path: {parsed.path}")
+        base_path = "/".join(path_parts[:proj_idx])
+        return ParsedBuildURL(
+            base_url=f"{parsed.scheme}://{parsed.netloc}{base_path}",
+            project=project,
+            build_id=build_id,
+        )
+
+    # Try UI URL format: /_build/results?buildId=<id>
+    ui_match = _BUILD_UI_RE.match(url)
     qs = parse_qs(parsed.query)
     build_ids = qs.get("buildId", [])
+    if ui_match and build_ids:
+        project = ui_match.group("project")
+        build_id = build_ids[0]
+        try:
+            proj_idx = path_parts.index(project)
+        except ValueError:
+            raise BuildURLParseError(f"Cannot locate project segment in path: {parsed.path}")
+        base_path = "/".join(path_parts[:proj_idx])
+        return ParsedBuildURL(
+            base_url=f"{parsed.scheme}://{parsed.netloc}{base_path}",
+            project=project,
+            build_id=build_id,
+        )
 
-    match = _BUILD_URL_RE.match(url)
-    if not match or not build_ids:
-        raise BuildURLParseError(f"Not a valid Azure DevOps build results URL: {url}")
-
-    build_id = build_ids[0]
-    project = match.group("project")
-
-    # Reconstruct base_url: everything up to /<project>/_build
-    path_parts = parsed.path.split("/")
-    # Find the project segment index
-    try:
-        proj_idx = path_parts.index(project)
-    except ValueError:
-        raise BuildURLParseError(f"Cannot locate project segment in path: {parsed.path}")
-
-    base_path = "/".join(path_parts[:proj_idx])
-    base_url = f"{parsed.scheme}://{parsed.netloc}{base_path}"
-
-    return ParsedBuildURL(base_url=base_url, project=project, build_id=build_id)
+    raise BuildURLParseError(f"Not a valid Azure DevOps build results URL: {url}")
 
 
 def _auth_headers(token: str) -> dict[str, str]:

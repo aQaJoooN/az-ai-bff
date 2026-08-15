@@ -74,6 +74,14 @@ def test_parse_build_url_extracts_components() -> None:
     assert parsed.base_url == "https://stageazure.asax.ir/tfs/AsaProjects"
 
 
+def test_parse_build_url_accepts_api_url_format() -> None:
+    api_url = "https://stageazure.asax.ir/tfs/AsaProjects/967834e8-8a18-4a43-88aa-02bd7f158589/_apis/build/builds/1116401"
+    parsed = parse_build_url(api_url)
+    assert parsed.build_id == "1116401"
+    assert parsed.project == "967834e8-8a18-4a43-88aa-02bd7f158589"
+    assert parsed.base_url == "https://stageazure.asax.ir/tfs/AsaProjects"
+
+
 def test_parse_build_url_rejects_invalid_urls() -> None:
     with pytest.raises(BuildURLParseError):
         parse_build_url("https://example.com/not-a-build-url")
