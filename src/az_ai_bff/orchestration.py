@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 
 from az_ai_bff.backend import AIBackendClient, AIBackendError, AIBackendRegistry, AllAIBackendsFailedError
 from az_ai_bff.models import AIAnswer, ChatTurn
@@ -72,3 +72,24 @@ class AIOrchestrator:
         if not answers:
             raise AllAIBackendsFailedError
         return self._synthesizer.synthesize(answers)
+
+    async def stream_generate(
+        self,
+        message: str,
+        conversation_id: str | None,
+        context: Sequence[ChatTurn] = (),
+        output_token_limit: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream from the primary backend only.
+
+        Multi-AI fan-out is intentionally not supported for streaming — combining
+        parallel streams with unknown lengths would require buffering everything,
+        which defeats the purpose of streaming.
+        """
+        async for chunk in self._registry.primary.stream_generate(
+            message,
+            conversation_id,
+            context=context,
+            output_token_limit=output_token_limit,
+        ):
+            yield chunk

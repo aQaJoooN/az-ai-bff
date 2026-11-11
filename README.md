@@ -16,6 +16,7 @@ This BFF service is designed to work with the [Azure DevOps Build AI Reviewer](h
 
 - FastAPI-based REST API
 - OpenAI-compatible AI backend integration
+- SSE streaming for chat and analysis responses (`?stream=true`)
 - Token management and budget control
 - Multi-AI backend support
 - Dockerized deployment
@@ -88,6 +89,23 @@ curl http://localhost/api/v1/chat \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{"message": "Hello"}'
+
+# Stream chat response (SSE)
+curl -N http://localhost/api/v1/chat?stream=true \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"message": "Hello"}'
+
+# Stream analyze response (SSE)
+curl -N https://your-bff-host/api/v1/analyze?stream=true \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{
+    "message": "azure build pipeline error",
+    "data": "https://your-tfs/tfs/Collection/ProjectId/_build/results?buildId=12345",
+    "role": "user",
+    "type": "normal"
+  }'
 ```
 
 ### Analyze endpoint logic
@@ -105,6 +123,29 @@ When processing `azure build pipeline error`, the service:
 2. Finds all failed tasks in the build timeline
 3. Fetches their logs and greps for `error` with 5 lines of context around each match
 4. Sends the extracted logs to the configured AI backend and returns the answer
+
+### Streaming
+
+Both `/api/v1/chat` and `/api/v1/analyze` support SSE streaming via `?stream=true`.
+
+Responses are a sequence of `data: {...}` lines. Three event types are emitted:
+
+| `type` | When | Key fields |
+|--------|------|------------|
+| `chunk` | Each text delta from the AI | `text`, `backend_id` |
+| `done` | Stream completed successfully | `conversation_id`, `backend_id`, `request_id` |
+| `error` | Stream failed mid-flight | `code`, `message`, `request_id` |
+
+Example SSE output:
+```
+data: {"type":"chunk","text":"Root cause:","backend_id":"primary"}
+
+data: {"type":"chunk","text":" missing dependency","backend_id":"primary"}
+
+data: {"type":"done","conversation_id":null,"backend_id":"primary","request_id":"abc-123"}
+```
+
+For `openai` format backends, the BFF forwards `stream: true` to the upstream and parses its SSE natively. For `simple` format backends, the response is buffered and emitted as a single chunk — simple backends rarely support SSE.
 
 ## Documentation
 

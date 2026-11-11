@@ -1,5 +1,6 @@
+import json
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Annotated, Protocol
 
 import httpx
@@ -42,6 +43,14 @@ class AIBackendClient(Protocol):
         context: Sequence[ChatTurn] = (),
         output_token_limit: int | None = None,
     ) -> AIAnswer: ...
+
+    async def stream_generate(
+        self,
+        message: str,
+        conversation_id: str | None,
+        context: Sequence[ChatTurn] = (),
+        output_token_limit: int | None = None,
+    ) -> AsyncIterator[str]: ...
 
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -176,6 +185,66 @@ class HttpAIBackendClient:
             input_tokens=provider_response.input_tokens,
             output_tokens=provider_response.output_tokens,
         )
+
+    async def stream_generate(
+        self,
+        message: str,
+        conversation_id: str | None,
+        context: Sequence[ChatTurn] = (),
+        output_token_limit: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream text chunks from the backend.
+
+        For the ``openai`` format, sends ``stream=true`` and parses SSE lines.
+        For the ``simple`` format, falls back to a buffered request and yields
+        the full answer as a single chunk — simple backends rarely support SSE.
+        """
+        payload = self._build_payload(message, conversation_id, context, output_token_limit)
+        headers = {"Authorization": f"Bearer {self._credential}"} if self._credential else {}
+
+        if self._format != "openai":
+            # simple format: buffer and yield once
+            answer = await self.generate(message, conversation_id, context, output_token_limit)
+            yield answer.text
+            return
+
+        payload["stream"] = True
+        try:
+            async with self._client.stream("POST", self._url, json=payload, headers=headers) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as error:
+                    raise AIBackendRejectedError from error
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+
+                    # Respect reasoning_mode: prefer reasoning_content when set
+                    if self._reasoning_mode:
+                        text = delta.get("reasoning_content") or delta.get("content") or ""
+                    else:
+                        text = delta.get("content") or ""
+
+                    if text:
+                        yield text
+
+        except httpx.TimeoutException as error:
+            raise AIBackendTimeoutError from error
+        except httpx.RequestError as error:
+            raise AIBackendUnavailableError from error
 
     def _build_payload(
         self,

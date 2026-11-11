@@ -48,7 +48,9 @@ def test_health_preserves_or_generates_request_id() -> None:
         preserved = client.get("/health", headers={"X-Request-ID": "request-123"})
         generated = client.get("/health", headers={"X-Request-ID": "invalid request id"})
 
-    assert preserved.json() == {"status": "available"}
+    assert preserved.json()["status"] == "available"
+    assert preserved.json()["version"] == "1.0.0"
+    assert isinstance(preserved.json()["uptime_seconds"], float)
     assert preserved.headers["X-Request-ID"] == "request-123"
     assert re.fullmatch(r"[0-9a-f-]{36}", generated.headers["X-Request-ID"])
 

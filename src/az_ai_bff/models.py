@@ -1,3 +1,5 @@
+import json
+import time
 from typing import Annotated, Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints, model_serializer
@@ -27,11 +29,22 @@ class ChatRequest(APIModel):
         return {"message": self.message, "conversation_id": self.conversation_id}
 
 
-class ChatResponse(APIModel):
+class AIResponse(APIModel):
+    """Shared base for all AI-generated response models."""
     answer: str
-    conversation_id: str | None
     backend_id: str
     request_id: str
+
+
+class ChatResponse(AIResponse):
+    conversation_id: str | None
+
+    # Preserve stable field order: answer, conversation_id, backend_id, request_id
+    model_config = ConfigDict(extra="forbid")
+
+    def model_dump(self, **kwargs):
+        d = super().model_dump(**kwargs)
+        return {k: d[k] for k in ("answer", "conversation_id", "backend_id", "request_id")}
 
 
 class ErrorResponse(APIModel):
@@ -42,6 +55,8 @@ class ErrorResponse(APIModel):
 
 class HealthResponse(APIModel):
     status: Literal["available"] = "available"
+    version: str = "1.0.0"
+    uptime_seconds: float = Field(default_factory=lambda: 0.0, ge=0)
 
 
 class AIAnswer(APIModel):
@@ -59,11 +74,44 @@ class AnalyzeRequest(APIModel):
     type: Literal["normal", "super"]
 
 
-class AnalyzeResponse(APIModel):
-    answer: str
-    request_id: str
+class AnalyzeResponse(AIResponse):
+    pass
 
 
 class UnsupportedResponse(APIModel):
     answer: Literal["unsupported"] = "unsupported"
     request_id: str
+
+
+# --- SSE streaming models ---
+
+class StreamChunk(BaseModel):
+    """A single SSE data chunk sent during streaming."""
+    type: Literal["chunk"] = "chunk"
+    text: str
+    backend_id: str
+
+    def to_sse(self) -> str:
+        return f"data: {json.dumps(self.model_dump())}\n\n"
+
+
+class StreamDone(BaseModel):
+    """Final SSE event sent when streaming is complete."""
+    type: Literal["done"] = "done"
+    conversation_id: str | None
+    backend_id: str
+    request_id: str
+
+    def to_sse(self) -> str:
+        return f"data: {json.dumps(self.model_dump())}\n\n"
+
+
+class StreamError(BaseModel):
+    """SSE event sent when streaming fails mid-stream."""
+    type: Literal["error"] = "error"
+    code: str
+    message: str
+    request_id: str
+
+    def to_sse(self) -> str:
+        return f"data: {json.dumps(self.model_dump())}\n\n"

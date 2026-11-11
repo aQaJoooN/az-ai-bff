@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 import logging
+import time
 from typing import Annotated, Any, AsyncIterator
 
 import httpx
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError
 from az_ai_bff.backend import AIBackendRegistry
@@ -14,7 +16,7 @@ from az_ai_bff.config import Settings
 from az_ai_bff.orchestration import AIOrchestrator
 from az_ai_bff.errors import APIError, install_exception_handlers
 from az_ai_bff.middleware import RequestContextMiddleware
-from az_ai_bff.models import AnalyzeRequest, AnalyzeResponse, ChatRequest, ChatResponse, ChatTurn, ErrorResponse, HealthResponse, UnsupportedResponse
+from az_ai_bff.models import AnalyzeRequest, AnalyzeResponse, ChatRequest, ChatResponse, ChatTurn, ErrorResponse, HealthResponse, StreamError, UnsupportedResponse
 from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
 
@@ -42,6 +44,7 @@ def create_app(
             token_manager = TokenManager.from_settings(resolved_settings)
             app.state.http_client = client
             app.state.chat_service = ChatService(orchestrator, token_manager)
+            app.state.started_at = time.monotonic()
             yield
 
     app = FastAPI(title="Azure DevOps AI BFF", version="1.0.0", lifespan=lifespan)
@@ -58,8 +61,9 @@ def create_app(
     app.add_middleware(RequestContextMiddleware)
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
-    async def health() -> HealthResponse:
-        return HealthResponse()
+    async def health(request: Request) -> HealthResponse:
+        uptime = time.monotonic() - getattr(request.app.state, "started_at", time.monotonic())
+        return HealthResponse(uptime_seconds=round(uptime, 3))
 
     @app.post(
         "/api/v1/chat",
@@ -78,7 +82,19 @@ def create_app(
         chat_request: ChatRequest,
         request: Request,
         _: Annotated[None, Depends(require_access_credential)],
-    ) -> ChatResponse:
+        stream: bool = Query(default=False, description="Stream the response as SSE"),
+    ) -> ChatResponse | StreamingResponse:
+        if stream:
+            sse_stream = request.app.state.chat_service.create_stream(chat_request, request.state.request_id)
+            return StreamingResponse(
+                sse_stream,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Request-ID": request.state.request_id,
+                },
+            )
         response = await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
         request.state.backend_id = response.backend_id
         return response
@@ -100,7 +116,8 @@ def create_app(
         analyze_request: AnalyzeRequest,
         request: Request,
         _: Annotated[None, Depends(require_access_credential)],
-    ) -> AnalyzeResponse | UnsupportedResponse:
+        stream: bool = Query(default=False, description="Stream the AI analysis as SSE"),
+    ) -> AnalyzeResponse | UnsupportedResponse | StreamingResponse:
         request_id = request.state.request_id
 
         if analyze_request.role != "user":
@@ -155,9 +172,22 @@ def create_app(
                 ),
             ],
         )
+
+        if stream:
+            sse_stream = request.app.state.chat_service.create_stream(log_chat_request, request_id)
+            return StreamingResponse(
+                sse_stream,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Request-ID": request_id,
+                },
+            )
+
         ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
         request.state.backend_id = ai_response.backend_id
-        return AnalyzeResponse(answer=ai_response.answer, request_id=request_id)
+        return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is None:
