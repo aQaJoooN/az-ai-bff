@@ -9,10 +9,10 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError
+from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError, parse_build_url
 from az_ai_bff.backend import AIBackendRegistry
 from az_ai_bff.chat import ChatService
-from az_ai_bff.concurrency import AISemaphore, _Slot
+from az_ai_bff.concurrency import AISemaphore, BuildTracker, _Slot
 from az_ai_bff.config import Settings
 from az_ai_bff.orchestration import AIOrchestrator
 from az_ai_bff.errors import APIError, install_exception_handlers
@@ -22,6 +22,12 @@ from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
 
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
+
+
+def _build_conflict_message(reason: str) -> str:
+    if reason == "build_already_analyzed":
+        return "This build has already been analyzed — open the existing result"
+    return "This build is already being analyzed — wait for the current request to finish"
 
 
 async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -55,6 +61,7 @@ def create_app(
             app.state.http_client = client
             app.state.chat_service = ChatService(orchestrator, token_manager)
             app.state.ai_semaphore = AISemaphore(resolved_settings.max_concurrent_ai_requests)
+            app.state.build_tracker = BuildTracker()
             app.state.started_at = time.monotonic()
             yield
 
@@ -124,6 +131,7 @@ def create_app(
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
             429: {"model": ErrorResponse},
             500: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
@@ -146,71 +154,98 @@ def create_app(
         if analyze_request.message == "azure build pipeline improvement":
             return UnsupportedResponse(request_id=request_id)
 
-        fetcher = AzureDevOpsLogFetcher(request.app.state.http_client, resolved_settings.azure_token.get_secret_value())
+        # --- feat2 & feat3: per-build deduplication ---
+        # Parse the build URL early so we have the build_id before any HTTP call.
         try:
-            error_logs = await fetcher.fetch_error_logs(str(analyze_request.data))
-        except BuildURLParseError as exc:
+            parsed_url = parse_build_url(str(analyze_request.data))
+        except Exception as exc:
             raise APIError(400, "invalid_build_url", str(exc)) from exc
-        except AzureAuthError as exc:
-            raise APIError(502, "azure_auth_error", str(exc)) from exc
-        except BuildLogFetchError as exc:
-            raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
 
-        line_count = error_logs.count("\n") + 1
-        char_count = len(error_logs)
+        build_slot = request.app.state.build_tracker.try_start(parsed_url.build_id)
+        if not build_slot.ok:
+            # build_already_processing  →  another request is in-flight right now
+            # build_already_analyzed    →  this run has already received an AI answer
+            status = 409
+            raise APIError(status, build_slot.reason, _build_conflict_message(build_slot.reason))
 
-        _analyze_logger.info(
-            "analyze_fetched_log_stats",
-            extra={
-                "request_id": request_id,
-                "build_id": str(analyze_request.data).split("buildId=")[-1],
-                "log_line_count": line_count,
-                "log_char_count": char_count,
-            },
-        )
-
-        log_chat_request = ChatRequest(
-            message=error_logs[:32_768],
-            conversation_id=None,
-            context=[
-                ChatTurn(
-                    role="system",
-                    content=(
-                        "You are an expert Azure DevOps and CI/CD build engineer. "
-                        "Analyze the provided build pipeline error log and respond in exactly three clearly labeled sections. "
-                        "Allocate your response as follows: ~35% explaining the problem, ~60% explaining the solution, ~5% for the summary.\n\n"
-                        "## Problem\n"
-                        "Explain what went wrong and why. Identify the root cause from the log.\n\n"
-                        "## Solution\n"
-                        "Provide concrete, step-by-step actions to fix the problem. Be specific — include commands, config changes, or settings where relevant.\n\n"
-                        "## Summary\n"
-                        "One or two sentences summarizing the issue and the fix."
-                    ),
-                ),
-            ],
-        )
-
-        slot = await request.app.state.ai_semaphore.acquire()
-        if not slot.ok:
-            raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
-        if stream:
-            sse_stream = _guarded_stream(
-                slot,
-                request.app.state.chat_service.create_stream(log_chat_request, request_id),
+        with build_slot:
+            fetcher = AzureDevOpsLogFetcher(
+                request.app.state.http_client,
+                resolved_settings.azure_token.get_secret_value(),
             )
-            return StreamingResponse(
-                sse_stream,
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                    "X-Request-ID": request_id,
+            try:
+                error_logs = await fetcher.fetch_error_logs(str(analyze_request.data))
+            except BuildURLParseError as exc:
+                raise APIError(400, "invalid_build_url", str(exc)) from exc
+            except AzureAuthError as exc:
+                raise APIError(502, "azure_auth_error", str(exc)) from exc
+            except BuildLogFetchError as exc:
+                raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
+
+            line_count = error_logs.count("\n") + 1
+            char_count = len(error_logs)
+
+            _analyze_logger.info(
+                "analyze_fetched_log_stats",
+                extra={
+                    "request_id": request_id,
+                    "build_id": parsed_url.build_id,
+                    "log_line_count": line_count,
+                    "log_char_count": char_count,
                 },
             )
-        async with slot:
-            ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
-            request.state.backend_id = ai_response.backend_id
-            return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
+
+            log_chat_request = ChatRequest(
+                message=error_logs,
+                conversation_id=None,
+                context=[
+                    ChatTurn(
+                        role="system",
+                        content=(
+                            "You are an expert Azure DevOps and CI/CD build engineer. "
+                            "Analyze the provided build pipeline error log and respond in exactly three clearly labeled sections. "
+                            "Allocate your response as follows: ~35% explaining the problem, ~60% explaining the solution, ~5% for the summary.\n\n"
+                            "## Problem\n"
+                            "Explain what went wrong and why. Identify the root cause from the log.\n\n"
+                            "## Solution\n"
+                            "Provide concrete, step-by-step actions to fix the problem. Be specific — include commands, config changes, or settings where relevant.\n\n"
+                            "## Summary\n"
+                            "One or two sentences summarizing the issue and the fix."
+                        ),
+                    ),
+                ],
+            )
+
+            slot = await request.app.state.ai_semaphore.acquire()
+            if not slot.ok:
+                raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
+            if stream:
+                # Mark the build as done when the stream finishes.
+                async def _stream_and_complete() -> AsyncIterator[str]:
+                    try:
+                        async for chunk in _guarded_stream(
+                            slot,
+                            request.app.state.chat_service.create_stream(log_chat_request, request_id),
+                        ):
+                            yield chunk
+                        build_slot.mark_done()
+                    except Exception:
+                        raise
+
+                return StreamingResponse(
+                    _stream_and_complete(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                        "X-Request-ID": request_id,
+                    },
+                )
+            async with slot:
+                ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
+                request.state.backend_id = ai_response.backend_id
+                build_slot.mark_done()
+                return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is None:

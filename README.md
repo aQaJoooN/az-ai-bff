@@ -1,105 +1,128 @@
 # Azure DevOps AI Backend-for-Frontend (BFF)
 
-A FastAPI-based backend-for-frontend service for Azure DevOps AI integrations.
+A FastAPI service that sits between the [Azure DevOps Build AI Reviewer](https://github.com/aQaJoooN/azure-devops-build-ai-reviewer) browser extension and your AI backend. It fetches failed build logs from your on-premise TFS/Azure DevOps server, compacts them into a dense, signal-rich format, and forwards them to the AI for root-cause analysis.
 
-## Integration with Azure DevOps AI Analyzer Extension
-
-This BFF service is designed to work with the [Azure DevOps Build AI Reviewer](https://github.com/aQaJoooN/azure-devops-build-ai-reviewer) extension. To enable AI analysis in Azure DevOps:
-
-1. **Install the extension**: Get the AI Analyzer extension from the Azure DevOps Marketplace
-2. **Configure the extension**: Set the BFF URL in the extension settings
-3. **Deploy this BFF**: Follow the deployment instructions below
-4. **Configure CORS**: Ensure your Azure DevOps organization URL is in the allowed origins
-5. **Enable HTTPS**: If Azure DevOps uses HTTPS, this BFF must also use HTTPS
+---
 
 ## Features
 
-- FastAPI-based REST API
-- OpenAI-compatible AI backend integration
-- SSE streaming for chat and analysis responses (`?stream=true`)
-- Token management and budget control
-- Multi-AI backend support
-- Dockerized deployment
-- Nginx reverse proxy configuration
-- GitHub Actions CI/CD pipeline
+| Feature | Description |
+|---------|-------------|
+| **AI concurrency cap** | Configurable limit on simultaneous AI requests across all endpoints. Excess requests receive 429 immediately. |
+| **Build deduplication** | Each build ID is processed at most once at a time. A duplicate in-flight request receives 409. |
+| **Completed-run idempotency** | Once a build receives a successful AI analysis, the BFF refuses to analyze it again. Prevents curl/replay abuse. |
+| **Log compaction** | Before sending to the AI, logs are stripped of ANSI codes, timestamps, boilerplate, and duplicate lines. Only error/warning/exception lines and their surrounding context are kept. |
+| **SSE streaming** | Both endpoints support `?stream=true` for server-sent event streaming. |
+| **Multi-AI fan-out** | Optional parallel dispatch to multiple AI backends with response synthesis. |
+| **Token budget** | Optional character-based token estimation with context trimming. |
+| **OpenAI + simple formats** | Works with OpenAI-compatible APIs and custom simple backends. |
+| **Reasoning model support** | `BACKEND_REASONING_MODE=true` for models that answer in `reasoning_content` (DeepSeek, Qwen3, etc.). |
+| **Structured JSON logs** | Every request and AI call emits one JSON line with stable fields. |
+
+---
+
+## Integration with Azure DevOps AI Analyzer Extension
+
+1. **Install the extension** from the Azure DevOps Marketplace
+2. **Configure the extension** with your BFF URL
+3. **Deploy this BFF** (see [Deployment](#deployment) below)
+4. **Configure CORS** — add your Azure DevOps organization URL to `AZ_AI_BFF_ALLOWED_EXTENSION_ORIGINS`
+5. **Enable HTTPS** — if Azure DevOps is on HTTPS, this BFF must also be on HTTPS
+
+---
 
 ## Quick Start
 
-### Production Deployment (Using Docker Hub)
+### Production (Docker Hub image)
 
 ```bash
-# Create deployment directory
 mkdir az-ai-bff-deployment && cd az-ai-bff-deployment
 
-# Download production configuration
+# Download docker-compose and nginx config
 curl -O https://raw.githubusercontent.com/aqajooon/az-ai-bff/main/docker-compose.prod.yml
 
-# Choose your nginx configuration:
-# For HTTP-only: 
-curl -O https://raw.githubusercontent.com/aqajooon/az-ai-bff/main/nginx.conf.example-http -o nginx.conf
-# For HTTPS with HTTP-to-HTTPS redirect (recommended for Azure DevOps):
-curl -O https://raw.githubusercontent.com/aqajooon/az-ai-bff/main/nginx.conf.example-https -o nginx.conf
+# HTTP only:
+curl -o nginx.conf https://raw.githubusercontent.com/aqajooon/az-ai-bff/main/nginx.conf.example-http
+# HTTPS with redirect (recommended):
+curl -o nginx.conf https://raw.githubusercontent.com/aqajooon/az-ai-bff/main/nginx.conf.example-https
 
-# Create configuration
 mkdir -p nginx/ssl nginx/logs
-cp .env.example .env  # Edit with your settings
+cp .env.example .env   # then edit .env
 
-# Start services
 docker-compose -f docker-compose.prod.yml up -d
 ```
 
 ### Development
 
 ```bash
-# Clone repository
 git clone https://github.com/aqajooon/az-ai-bff.git
 cd az-ai-bff
 
-# Setup environment
-cp .env.example .env
-# Edit .env with your configuration
+cp .env.example .env   # edit .env
 
-# Run with Docker
+# Docker
 docker-compose up -d --build
 
-# Or run locally
+# Or locally
 pip install -e .
 python -m az_ai_bff
 ```
 
-## API Usage
+---
+
+## API Reference
+
+### `GET /health`
 
 ```bash
-# Health check
 curl http://localhost/health
+```
 
-# Analyze a failed Azure DevOps build pipeline
-curl https://your-bff-host/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -d '{
-    "message": "azure build pipeline error",
-    "data": "https://your-tfs/tfs/Collection/ProjectId/_build/results?buildId=12345",
-    "role": "user",
-    "type": "normal"
-  }'
+```json
+{"status":"available","version":"1.0.0","uptime_seconds":42.1}
+```
 
-# Chat endpoint (generic AI chat)
+---
+
+### `POST /api/v1/chat`
+
+Generic AI chat relay.
+
+```bash
 curl http://localhost/api/v1/chat \
-  -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -d '{"message": "Hello"}'
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is a NuGet feed?"}'
+```
 
-# Stream chat response (SSE)
-curl -N http://localhost/api/v1/chat?stream=true \
-  -H "Content-Type: application/json" \
+**Stream:**
+```bash
+curl -N "http://localhost/api/v1/chat?stream=true" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -d '{"message": "Hello"}'
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is a NuGet feed?"}'
+```
 
-# Stream analyze response (SSE)
-curl -N https://your-bff-host/api/v1/analyze?stream=true \
-  -H "Content-Type: application/json" \
+**Response `200`:**
+```json
+{
+  "answer": "A NuGet feed is...",
+  "conversation_id": null,
+  "backend_id": "primary",
+  "request_id": "abc-123"
+}
+```
+
+---
+
+### `POST /api/v1/analyze`
+
+Fetches failed build logs from Azure DevOps, compacts them, and returns an AI root-cause analysis.
+
+```bash
+curl https://your-bff-host/api/v1/analyze \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
     "message": "azure build pipeline error",
     "data": "https://your-tfs/tfs/Collection/ProjectId/_build/results?buildId=12345",
@@ -108,35 +131,57 @@ curl -N https://your-bff-host/api/v1/analyze?stream=true \
   }'
 ```
 
-### Analyze endpoint logic
+**Decision tree:**
 
-`POST /api/v1/analyze` applies the following decision tree:
+| `type` | `message` | Result |
+|--------|-----------|--------|
+| `super` | any | `{"answer": "unsupported"}` |
+| `normal` | `azure build pipeline improvement` | `{"answer": "unsupported"}` |
+| `normal` | `azure build pipeline error` | Log fetch → compact → AI analysis |
 
-| `role` | `type` | `message` | Result |
-|--------|--------|-----------|--------|
-| `user` | `super` | any | `{"answer": "unsupported"}` |
-| `user` | `normal` | `azure build pipeline improvement` | `{"answer": "unsupported"}` |
-| `user` | `normal` | `azure build pipeline error` | Fetches build logs → AI analysis |
+**Processing pipeline for `azure build pipeline error`:**
 
-When processing `azure build pipeline error`, the service:
-1. Validates the `data` URL against your on-premise Azure DevOps using `AZ_AI_BFF_AZURE_TOKEN`
-2. Finds all failed tasks in the build timeline
-3. Fetches their logs and greps for `error` with 5 lines of context around each match
-4. Sends the extracted logs to the configured AI backend and returns the answer
+1. Parse and validate the build URL
+2. Check the build ID against the in-flight and completed sets (→ 409 if duplicate)
+3. Acquire an AI concurrency slot (→ 429 if at the limit)
+4. Call Azure DevOps APIs to find all failed tasks and fetch their logs
+5. Compact each log (strip noise, keep errors + context, enforce char budget)
+6. Send the compacted log to the AI with a structured system prompt
+7. Mark the build as completed so future requests for the same run are rejected
 
-### Streaming
+**Response `200`:**
+```json
+{
+  "answer": "## Problem\n...\n\n## Solution\n...\n\n## Summary\n...",
+  "backend_id": "primary",
+  "request_id": "abc-123"
+}
+```
 
-Both `/api/v1/chat` and `/api/v1/analyze` support SSE streaming via `?stream=true`.
+**Error responses:**
 
-Responses are a sequence of `data: {...}` lines. Three event types are emitted:
+| Status | `code` | Cause |
+|--------|--------|-------|
+| 400 | `invalid_build_url` | URL is not a valid Azure DevOps build URL |
+| 401 | `unauthorized` | Missing or wrong `Authorization` header |
+| 409 | `build_already_processing` | Same build ID is currently being analyzed |
+| 409 | `build_already_analyzed` | This build already has an AI result — no replay allowed |
+| 429 | `rate_limit_exceeded` | AI concurrency cap reached — retry later |
+| 502 | `azure_auth_error` | Azure DevOps token is invalid or lacks permissions |
+| 502 | `azure_log_fetch_error` | Azure DevOps API returned an unexpected error |
 
-| `type` | When | Key fields |
-|--------|------|------------|
+---
+
+### SSE Streaming
+
+Add `?stream=true` to either endpoint. The response is a stream of `data: {...}\n\n` lines.
+
+| `type` | Sent when | Key fields |
+|--------|-----------|------------|
 | `chunk` | Each text delta from the AI | `text`, `backend_id` |
-| `done` | Stream completed successfully | `conversation_id`, `backend_id`, `request_id` |
+| `done` | Stream finished successfully | `conversation_id`, `backend_id`, `request_id` |
 | `error` | Stream failed mid-flight | `code`, `message`, `request_id` |
 
-Example SSE output:
 ```
 data: {"type":"chunk","text":"Root cause:","backend_id":"primary"}
 
@@ -145,77 +190,165 @@ data: {"type":"chunk","text":" missing dependency","backend_id":"primary"}
 data: {"type":"done","conversation_id":null,"backend_id":"primary","request_id":"abc-123"}
 ```
 
-For `openai` format backends, the BFF forwards `stream: true` to the upstream and parses its SSE natively. For `simple` format backends, the response is buffered and emitted as a single chunk — simple backends rarely support SSE.
+For `openai` format backends the BFF forwards `stream: true` upstream and parses its SSE natively. For `simple` format backends the response is buffered and emitted as one chunk.
 
-## Documentation
-
-- [Detailed Deployment Guide](DEPLOYMENT.md) - Complete setup and configuration
-- [API Reference](#) - API documentation (generate with `make docs`)
+---
 
 ## Configuration
 
-### Required for Azure DevOps Integration:
-- `AZ_AI_BFF_ALLOWED_EXTENSION_ORIGINS` - Azure DevOps organization URLs (e.g., `["https://dev.azure.com/your-org"]`)
-- HTTPS enabled with valid SSL certificates
-- Proper CORS headers configured in nginx
+All variables are prefixed `AZ_AI_BFF_`. Copy `.env.example` to `.env` and edit.
 
-### Required environment variables (see `.env.example`):
+### Required
 
-- `AZ_AI_BFF_AZURE_TOKEN` - **Required.** Personal Access Token (PAT) for your on-premise Azure DevOps / TFS server. Used by the `/api/v1/analyze` endpoint to fetch build logs.
-- `AZ_AI_BFF_ACCESS_CREDENTIAL` - Authentication token for the API (optional — leave empty to disable)
-- `AZ_AI_BFF_BACKEND_URL` - AI backend URL (e.g., OpenAI-compatible)
-- `AZ_AI_BFF_BACKEND_MODEL` - AI model name
-- `AZ_AI_BFF_BACKEND_CREDENTIAL` - Backend authentication token
-- `AZ_AI_BFF_BACKEND_FORMAT` - Backend format (`simple` or `openai`)
+| Variable | Description |
+|----------|-------------|
+| `TRUSTED_PROXY_ADDRESSES` | JSON list of IPs allowed to set proxy headers, e.g. `["nginx"]` |
+| `BACKEND_URL` | AI backend URL |
+| `BACKEND_MODEL` | Model name passed to the backend |
+| `AZURE_TOKEN` | PAT for your on-premise TFS/Azure DevOps server |
+| `RESPONSE_TIMEOUT_SECONDS` | Seconds to wait for the AI backend |
 
-### Azure DevOps Specific:
-- If Azure DevOps uses HTTPS, this BFF must also use HTTPS
-- Add your specific Azure DevOps URLs to CORS allowed origins
-- Ensure the BFF URL matches what's configured in the Azure DevOps extension
+### Authentication
 
-## CI/CD Pipeline
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACCESS_CREDENTIAL` | _(empty)_ | Bearer token callers must supply. Leave empty to disable auth. |
 
-The repository includes GitHub Actions workflow that:
-- Automatically builds Docker images on pushes
-- Pushes to Docker Hub
-- Supports multi-architecture builds (amd64/arm64)
-- Runs tests on pull requests
+### AI Backend
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND_FORMAT` | `simple` | `simple` or `openai` |
+| `BACKEND_CREDENTIAL` | _(empty)_ | Bearer token forwarded to the AI backend |
+| `BACKEND_ID` | `primary` | Identifier used in logs and responses |
+| `BACKEND_REASONING_MODE` | `false` | Set `true` for models that reply in `reasoning_content` (DeepSeek, Qwen3, etc.) |
+| `MAX_TOKENS` | _(unset)_ | If set, appended as `max_tokens` on every AI request |
+
+### Concurrency
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_CONCURRENT_AI_REQUESTS` | `5` | Maximum simultaneous AI backend calls across all endpoints. The next request over the limit receives **429**. Set to `0` to disable. |
+
+The concurrency limit applies globally — `/api/v1/chat` and `/api/v1/analyze` share the same pool. Five concurrent users means the sixth gets a 429 and should retry.
+
+### Token Budget (optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOKEN_BUDGET_ENABLED` | `false` | Enable character-based token estimation |
+| `INPUT_TOKEN_BUDGET` | `4096` | Max estimated input tokens |
+| `OUTPUT_TOKEN_LIMIT` | `1024` | Max output tokens sent to the backend |
+| `TOKEN_CHARACTERS_PER_TOKEN` | `4.0` | Characters per token for estimation |
+
+### Multi-AI (optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MULTI_AI_ENABLED` | `false` | Fan out to all configured backends in parallel |
+| `ADDITIONAL_BACKENDS` | `[]` | JSON list of `AIBackendSettings` objects |
+
+### Server / Network
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INTERNAL_HOST` | `127.0.0.1` | Bind address |
+| `INTERNAL_PORT` | `8000` | Bind port |
+| `CONNECT_TIMEOUT_SECONDS` | `5` | HTTP connection timeout |
+| `ALLOWED_EXTENSION_ORIGINS` | `[]` | CORS origins for the browser extension |
+
+---
+
+## How the Four Features Work
+
+### 1. AI Concurrency Cap
+
+`AZ_AI_BFF_MAX_CONCURRENT_AI_REQUESTS` sets the maximum number of requests that can be calling the AI backend simultaneously. When the cap is reached any new request is rejected immediately with **429** — the semaphore is never waited on, so there is no hidden queue building up behind slow builds.
+
+The slot is held for the full duration of the AI call, including the entire SSE stream for streaming requests.
+
+### 2. Per-Build In-Flight Deduplication
+
+The BFF parses the `buildId` from the request URL before making any network call. If a request for that `buildId` is already in progress, the new request gets **409 `build_already_processing`** instantly.
+
+The in-flight lock is released whether the analysis succeeds or fails, so a build that errored out (Azure 401, network timeout, etc.) can always be retried.
+
+### 3. Completed-Run Idempotency
+
+When an AI analysis finishes successfully the `buildId` moves to a permanent completed set. Any future request for that exact run ID — from any client, including curl simulations — receives **409 `build_already_analyzed`**.
+
+This means the two 409 codes have distinct meanings:
+- `build_already_processing` → another request is in-flight right now; wait and retry
+- `build_already_analyzed` → this run already has a result; open the existing analysis
+
+### 4. Log Compaction
+
+Raw Azure Pipelines logs are noisy. Before the AI sees anything, `compact_log` runs the following pipeline:
+
+1. **Strip ANSI escape codes** — colour codes from coloured output
+2. **Strip timestamps** — every line starts with `2024-05-10T12:34:56.1234567Z`; dropped entirely
+3. **Drop boilerplate** — `##[section]`, `##[command]`, agent setup lines, task-downloading lines, blank lines
+4. **Collapse duplicates** — a run of 12 identical `Warning: retrying` lines becomes `[×12] Warning: retrying`
+5. **Keep signal + context** — lines matching `error`, `warning`, `exception`, `traceback`, `fatal`, `fail`, `cannot`, `could not`, `unable to`, `not found`, `denied`, `stack trace`, or stack-frame patterns are kept, plus 3 surrounding context lines
+6. **Enforce char budget** — hard-truncates at 24 000 characters with a `[... N lines truncated]` note
+
+The AI receives a compact, signal-dense document instead of thousands of lines of setup scaffolding.
+
+---
 
 ## Project Structure
 
 ```
-├── src/az_ai_bff/           # Application source code
-│   ├── app.py               # Routes: /health, /api/v1/chat, /api/v1/analyze
-│   ├── analyze.py           # Azure DevOps log fetcher and error grep
-│   ├── backend.py           # AI backend HTTP client (simple + openai formats)
-│   ├── chat.py              # Chat service (orchestration + token management)
-│   ├── config.py            # Pydantic settings (AZ_AI_BFF_* env vars)
-│   ├── models.py            # Request/response Pydantic models
-│   ├── orchestration.py     # Multi-AI fan-out and response synthesis
-│   ├── security.py          # Bearer token auth
-│   ├── middleware.py        # Request ID propagation + structured logging
-│   ├── token_management.py  # Token budget estimation and context trimming
-│   ├── errors.py            # Centralized exception handlers
-│   └── logging_config.py   # JSON structured logging
-├── tests/                   # Test suite
-├── .github/workflows/       # GitHub Actions workflows
-├── Dockerfile               # Docker build configuration
-├── docker-compose.yml       # Development Docker Compose
-├── docker-compose.prod.yml  # Production Docker Compose
-├── nginx.conf.example-http  # HTTP-only example configuration
-├── nginx.conf.example-https # HTTPS with HTTP-to-HTTPS redirect example
-├── pyproject.toml           # Python dependencies
-└── .env.example             # Environment configuration template
+src/az_ai_bff/
+├── app.py               # Routes, lifespan, feature wiring
+├── analyze.py           # Azure DevOps log fetcher + compact_log
+├── concurrency.py       # AISemaphore (rate limit) + BuildTracker (dedup)
+├── backend.py           # AI backend HTTP client (simple + openai formats)
+├── chat.py              # ChatService — non-streaming and streaming paths
+├── config.py            # Pydantic settings (AZ_AI_BFF_* env vars)
+├── models.py            # All request/response Pydantic models
+├── orchestration.py     # Multi-AI fan-out and response synthesis
+├── security.py          # Bearer token auth dependency
+├── middleware.py        # Request ID propagation + access logging
+├── token_management.py  # Token budget estimation and context trimming
+├── errors.py            # Centralized exception → HTTP response mapping
+└── logging_config.py    # JSON structured logging formatter
+
+tests/
+├── test_app.py              # Core request/response integration tests
+├── test_analyze.py          # URL parsing, log fetching, analyze route
+├── test_backend.py          # AI backend HTTP client unit tests
+├── test_build_tracker.py    # BuildTracker (feat2+3) + compact_log (feat4) tests
+├── test_concurrency.py      # AISemaphore (feat1) tests
+├── test_config.py           # Settings validation tests
+├── test_orchestration.py    # Multi-AI fan-out tests
+├── test_streaming.py        # SSE streaming tests
+└── test_token_management.py # Token budget tests
 ```
 
-## Contributing
+---
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes and add tests
-4. Run tests: `pytest tests/`
-5. Submit a pull request
+## Running Tests
+
+```bash
+pip install -e .
+pytest tests/
+```
+
+---
+
+## CI/CD
+
+GitHub Actions builds and pushes a multi-architecture Docker image (amd64/arm64) to Docker Hub on every push to `main`. Tests run on every pull request.
+
+---
+
+## Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for full setup instructions including nginx TLS configuration, Docker Compose options, and environment variable reference.
+
+---
 
 ## License
 
-[License Name] - See LICENSE file for details.
+See [LICENSE](LICENSE).
