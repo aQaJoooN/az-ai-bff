@@ -37,6 +37,7 @@ def _make_settings() -> Settings:
         backend_format="openai",
         response_timeout_seconds=30,
         azure_token="test-azure-pat",
+        require_client_signature=False,
     )
 
 

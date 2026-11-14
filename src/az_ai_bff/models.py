@@ -71,6 +71,9 @@ class AnalyzeRequest(APIModel):
     data: AnyHttpUrl
     role: Literal["user"]
     type: Literal["normal", "super"]
+    # 32-char lowercase hex MD5 of "azure-host|project-id|run-id".
+    # Required when AZ_AI_BFF_REQUIRE_CLIENT_SIGNATURE=true (the default).
+    client_signature: str | None = None
 
 
 class AnalyzeResponse(AIResponse):

@@ -33,7 +33,7 @@ from az_ai_bff.models import (
     HealthResponse,
     UnsupportedResponse,
 )
-from az_ai_bff.security import require_access_credential
+from az_ai_bff.security import require_access_credential, verify_client_signature
 from az_ai_bff.token_management import TokenManager
 
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
@@ -161,6 +161,16 @@ def create_app(
 
         if analyze_request.message == "azure build pipeline improvement":
             return UnsupportedResponse(request_id=request_id)
+
+        # --- Client signature check ---
+        # Verify before any heavy work (Azure API calls, AI calls).
+        if resolved_settings.require_client_signature:
+            if not verify_client_signature(str(analyze_request.data), analyze_request.client_signature):
+                raise APIError(
+                    401,
+                    "invalid_signature",
+                    "Request signature is missing or does not match the build URL",
+                )
 
         # --- Parse URL first so we have build_id and can call the AzDO API ---
         try:

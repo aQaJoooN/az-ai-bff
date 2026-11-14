@@ -11,6 +11,7 @@ A FastAPI service that sits between the [Azure DevOps Build AI Reviewer](https:/
 | **AI concurrency cap** | Configurable limit on simultaneous AI requests across all endpoints. Excess requests receive 429 immediately. |
 | **Build deduplication** | Each build ID is processed at most once at a time. A duplicate in-flight request receives 409. |
 | **Completed-run idempotency** | Once a build receives a successful AI analysis, the BFF refuses to analyze it again. Prevents curl/replay abuse. |
+| **Client signature** | Every `/api/v1/analyze` request must include a 32-char MD5 signature derived from the build URL. Requests without a valid signature are rejected with 401. |
 | **Log compaction** | Before sending to the AI, logs are stripped of ANSI codes, timestamps, boilerplate, and duplicate lines. Only error/warning/exception lines and their surrounding context are kept. |
 | **SSE streaming** | Both endpoints support `?stream=true` for server-sent event streaming. |
 | **Multi-AI fan-out** | Optional parallel dispatch to multiple AI backends with response synthesis. |
@@ -164,11 +165,42 @@ curl https://your-bff-host/api/v1/analyze \
 |--------|--------|-------|
 | 400 | `invalid_build_url` | URL is not a valid Azure DevOps build URL |
 | 401 | `unauthorized` | Missing or wrong `Authorization` header |
+| 401 | `invalid_signature` | `client_signature` is missing or does not match the build URL |
 | 409 | `pipeline_already_processing` | A run of this pipeline definition is currently being analyzed |
 | 409 | `build_already_analyzed` | This run already has an AI result (`ai-analyzed` tag present in Azure DevOps) |
 | 429 | `rate_limit_exceeded` | AI concurrency cap reached — retry later |
 | 502 | `azure_auth_error` | Azure DevOps token is invalid or lacks permissions |
 | 502 | `azure_log_fetch_error` | Azure DevOps API returned an unexpected error |
+
+#### Client signature algorithm
+
+Every `/api/v1/analyze` request body must include a `client_signature` field. The extension generates it as follows:
+
+**Step 1 — extract the three parts from the build URL:**
+
+| Part | Description | Example |
+|------|-------------|---------|
+| `azure_host` | Hostname only — lowercase, no protocol, no port, no slash | `stageazure.asax.ir` |
+| `project_id` | Project GUID or name from the URL path | `bc24cb70-e692-4049-ae06-d776b7bf4b81` |
+| `run_id` | Numeric build/run ID as a plain string | `1116251` |
+
+**Step 2 — concatenate with `|` delimiter:**
+```
+payload = `${azure_host}|${project_id}|${run_id}`
+// → "stageazure.asax.ir|bc24cb70-e692-4049-ae06-d776b7bf4b81|1116251"
+```
+
+**Step 3 — MD5 of the UTF-8–encoded payload:**
+```
+signature = md5(payload)   // 32 lowercase hex characters
+// → "3ed106d8182ba132e7ba5998a5ab1ef3"
+```
+
+**Rules:**
+- Always use `|` as the delimiter
+- `azure_host` must be lowercase with no protocol, port, or trailing slash
+- `run_id` is always treated as a string (no integer formatting)
+- Output must be 32 lowercase hexadecimal characters
 
 ---
 

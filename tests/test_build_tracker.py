@@ -59,6 +59,7 @@ def _make_settings() -> Settings:
         backend_credential="backend-secret",
         response_timeout_seconds=30,
         azure_token="valid-pat",
+        require_client_signature=False,
     )
 
 

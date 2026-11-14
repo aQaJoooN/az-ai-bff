@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # Maximum AI backend requests in-flight at the same time, across all
     # endpoints.  0 disables the limit.
     max_concurrent_ai_requests: int = Field(default=5, ge=0)
+    # When True, every /api/v1/analyze request must include a valid
+    # client_signature field (MD5 of "host|project_id|run_id").
+    # Set False to disable the check (e.g. during development).
+    require_client_signature: bool = True
 
     @field_validator("trusted_proxy_addresses")
     @classmethod
