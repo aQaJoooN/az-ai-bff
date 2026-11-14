@@ -17,12 +17,15 @@ class JsonFormatter(logging.Formatter):
         "output_tokens",
         "build_url",
         "build_id",
+        "failed_tasks",
         "log_line_count",
         "log_char_count",
         "finish_reason",
         "raw_response",
         "error",
         "hint",
+        "max_concurrent",
+        "remaining",
     )
 
     def format(self, record: logging.LogRecord) -> str:

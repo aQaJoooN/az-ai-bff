@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError
 from az_ai_bff.backend import AIBackendRegistry
 from az_ai_bff.chat import ChatService
+from az_ai_bff.concurrency import AISemaphore, _Slot
 from az_ai_bff.config import Settings
 from az_ai_bff.orchestration import AIOrchestrator
 from az_ai_bff.errors import APIError, install_exception_handlers
@@ -21,6 +22,15 @@ from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
 
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
+
+
+async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Yield from *inner* and release *slot* when the stream finishes or errors."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        await slot.__aexit__(None, None, None)
 
 
 def create_app(
@@ -44,6 +54,7 @@ def create_app(
             token_manager = TokenManager.from_settings(resolved_settings)
             app.state.http_client = client
             app.state.chat_service = ChatService(orchestrator, token_manager)
+            app.state.ai_semaphore = AISemaphore(resolved_settings.max_concurrent_ai_requests)
             app.state.started_at = time.monotonic()
             yield
 
@@ -71,6 +82,7 @@ def create_app(
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
             500: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
@@ -84,8 +96,14 @@ def create_app(
         _: Annotated[None, Depends(require_access_credential)],
         stream: bool = Query(default=False, description="Stream the response as SSE"),
     ) -> ChatResponse | StreamingResponse:
+        slot = await request.app.state.ai_semaphore.acquire()
+        if not slot.ok:
+            raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
         if stream:
-            sse_stream = request.app.state.chat_service.create_stream(chat_request, request.state.request_id)
+            sse_stream = _guarded_stream(
+                slot,
+                request.app.state.chat_service.create_stream(chat_request, request.state.request_id),
+            )
             return StreamingResponse(
                 sse_stream,
                 media_type="text/event-stream",
@@ -95,9 +113,10 @@ def create_app(
                     "X-Request-ID": request.state.request_id,
                 },
             )
-        response = await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
-        request.state.backend_id = response.backend_id
-        return response
+        async with slot:
+            response = await request.app.state.chat_service.create_response(chat_request, request.state.request_id)
+            request.state.backend_id = response.backend_id
+            return response
 
     @app.post(
         "/api/v1/analyze",
@@ -105,6 +124,7 @@ def create_app(
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
             500: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
@@ -119,9 +139,6 @@ def create_app(
         stream: bool = Query(default=False, description="Stream the AI analysis as SSE"),
     ) -> AnalyzeResponse | UnsupportedResponse | StreamingResponse:
         request_id = request.state.request_id
-
-        if analyze_request.role != "user":
-            raise APIError(400, "unsupported_role", "Only 'user' role is supported")
 
         if analyze_request.type == "super":
             return UnsupportedResponse(request_id=request_id)
@@ -173,8 +190,14 @@ def create_app(
             ],
         )
 
+        slot = await request.app.state.ai_semaphore.acquire()
+        if not slot.ok:
+            raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
         if stream:
-            sse_stream = request.app.state.chat_service.create_stream(log_chat_request, request_id)
+            sse_stream = _guarded_stream(
+                slot,
+                request.app.state.chat_service.create_stream(log_chat_request, request_id),
+            )
             return StreamingResponse(
                 sse_stream,
                 media_type="text/event-stream",
@@ -184,10 +207,10 @@ def create_app(
                     "X-Request-ID": request_id,
                 },
             )
-
-        ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
-        request.state.backend_id = ai_response.backend_id
-        return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
+        async with slot:
+            ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
+            request.state.backend_id = ai_response.backend_id
+            return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is None:

@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -14,7 +14,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _validate_secret(value: Optional[SecretStr]) -> Optional[SecretStr]:
+def _validate_secret(value: SecretStr | None) -> SecretStr | None:
     if value is None:
         return None
     if not value.get_secret_value().strip():
@@ -23,7 +23,7 @@ def _validate_secret(value: Optional[SecretStr]) -> Optional[SecretStr]:
 
 
 RequiredText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-OptionalSecret = Annotated[Optional[SecretStr], AfterValidator(_validate_secret)]
+OptionalSecret = Annotated[SecretStr | None, AfterValidator(_validate_secret)]
 
 
 class AIBackendSettings(BaseModel):
@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     azure_token: SecretStr
     connect_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     response_timeout_seconds: float = Field(gt=0, le=600)
+    # Maximum AI backend requests in-flight at the same time, across all
+    # endpoints.  0 disables the limit.
+    max_concurrent_ai_requests: int = Field(default=5, ge=0)
 
     @field_validator("trusted_proxy_addresses")
     @classmethod
