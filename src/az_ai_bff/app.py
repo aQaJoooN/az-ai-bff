@@ -169,7 +169,7 @@ def create_app(
                 raise APIError(
                     401,
                     "invalid_signature",
-                    "Request signature is missing or does not match the build URL",
+                    "Request signature is missing or does not match",
                 )
 
         # --- Parse URL first so we have build_id and can call the AzDO API ---
