@@ -164,8 +164,8 @@ curl https://your-bff-host/api/v1/analyze \
 |--------|--------|-------|
 | 400 | `invalid_build_url` | URL is not a valid Azure DevOps build URL |
 | 401 | `unauthorized` | Missing or wrong `Authorization` header |
-| 409 | `build_already_processing` | Same build ID is currently being analyzed |
-| 409 | `build_already_analyzed` | This build already has an AI result — no replay allowed |
+| 409 | `pipeline_already_processing` | A run of this pipeline definition is currently being analyzed |
+| 409 | `build_already_analyzed` | This run already has an AI result (`ai-analyzed` tag present in Azure DevOps) |
 | 429 | `rate_limit_exceeded` | AI concurrency cap reached — retry later |
 | 502 | `azure_auth_error` | Azure DevOps token is invalid or lacks permissions |
 | 502 | `azure_log_fetch_error` | Azure DevOps API returned an unexpected error |
@@ -267,19 +267,41 @@ The concurrency limit applies globally — `/api/v1/chat` and `/api/v1/analyze` 
 
 The slot is held for the full duration of the AI call, including the entire SSE stream for streaming requests.
 
-### 2. Per-Build In-Flight Deduplication
+### 2. Per-Pipeline In-Flight Lock
 
-The BFF parses the `buildId` from the request URL before making any network call. If a request for that `buildId` is already in progress, the new request gets **409 `build_already_processing`** instantly.
+The BFF fetches the build object from Azure DevOps to extract the **pipeline definition ID** (the `definition.id` field). This is the identifier for the pipeline definition, not for a specific run.
 
-The in-flight lock is released whether the analysis succeeds or fails, so a build that errored out (Azure 401, network timeout, etc.) can always be retried.
+If any run of that pipeline definition is currently being analyzed (by any client), the new request gets **409 `pipeline_already_processing`** immediately.
 
-### 3. Completed-Run Idempotency
+The lock is in-memory and always released when the request finishes — whether it succeeds, errors, or times out. This means retries after failures are always allowed.
 
-When an AI analysis finishes successfully the `buildId` moves to a permanent completed set. Any future request for that exact run ID — from any client, including curl simulations — receives **409 `build_already_analyzed`**.
+**Why definition ID, not run ID?**  
+The same pipeline can produce many runs. Allowing two different runs of the same pipeline to be analyzed at the same time would flood the AI backend with parallel requests and create a race on writing the completion tag. One at a time per pipeline is the right constraint.
 
-This means the two 409 codes have distinct meanings:
-- `build_already_processing` → another request is in-flight right now; wait and retry
-- `build_already_analyzed` → this run already has a result; open the existing analysis
+### 3. Completed-Run Idempotency via Azure DevOps Tags
+
+The old in-memory `_completed` set had two problems: it reset on restart, and a curl user bypassing the UI could lock a pipeline forever without the analysis ever appearing in the UI.
+
+The new mechanism writes a **build tag** directly to the Azure DevOps run when analysis completes:
+
+```
+PUT /_apis/build/builds/{buildId}/tags/ai-analyzed?api-version=6.0
+```
+
+Before processing any request, the BFF reads the tags for that run:
+
+```
+GET /_apis/build/builds/{buildId}/tags?api-version=6.0
+```
+
+If `ai-analyzed` is present → **409 `build_already_analyzed`**.
+
+This state is:
+- **Durable** — survives app restarts
+- **Shared** — visible to every client and every BFF instance
+- **Source-of-truth is Azure DevOps** — not the BFF process memory
+
+If the tags endpoint returns an error (503, network failure), the check **fails open** — the analysis is allowed to proceed rather than blocking indefinitely.
 
 ### 4. Log Compaction
 
@@ -301,8 +323,8 @@ The AI receives a compact, signal-dense document instead of thousands of lines o
 ```
 src/az_ai_bff/
 ├── app.py               # Routes, lifespan, feature wiring
-├── analyze.py           # Azure DevOps log fetcher + compact_log
-├── concurrency.py       # AISemaphore (rate limit) + BuildTracker (dedup)
+├── analyze.py           # Azure DevOps log fetcher, tag read/write, compact_log
+├── concurrency.py       # AISemaphore (rate limit) + PipelineInFlightTracker (dedup)
 ├── backend.py           # AI backend HTTP client (simple + openai formats)
 ├── chat.py              # ChatService — non-streaming and streaming paths
 ├── config.py            # Pydantic settings (AZ_AI_BFF_* env vars)
@@ -318,7 +340,7 @@ tests/
 ├── test_app.py              # Core request/response integration tests
 ├── test_analyze.py          # URL parsing, log fetching, analyze route
 ├── test_backend.py          # AI backend HTTP client unit tests
-├── test_build_tracker.py    # BuildTracker (feat2+3) + compact_log (feat4) tests
+├── test_build_tracker.py    # PipelineInFlightTracker (feat2), tag idempotency (feat3), compact_log (feat4)
 ├── test_concurrency.py      # AISemaphore (feat1) tests
 ├── test_config.py           # Settings validation tests
 ├── test_orchestration.py    # Multi-AI fan-out tests

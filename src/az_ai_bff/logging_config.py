@@ -26,6 +26,7 @@ class JsonFormatter(logging.Formatter):
         "hint",
         "max_concurrent",
         "remaining",
+        "pipeline_id",
     )
 
     def format(self, record: logging.LogRecord) -> str:

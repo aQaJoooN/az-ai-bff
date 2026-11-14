@@ -33,6 +33,11 @@ _BUILD_API_RE = re.compile(
 
 CONTEXT_LINES = 5
 
+# Tag written to a build run when AI analysis completes successfully.
+# Reading this tag back is how the BFF detects that a run was already analyzed,
+# even after an app restart or when the original request came from curl.
+AI_ANALYZED_TAG = "ai-analyzed"
+
 
 class BuildURLParseError(ValueError):
     """Raised when the data URL is not a recognisable Azure DevOps build URL."""
@@ -46,9 +51,13 @@ class BuildLogFetchError(Exception):
     """Raised when log retrieval fails for any other reason."""
 
 
+class BuildAlreadyAnalyzedError(Exception):
+    """Raised when the build already has the ``ai-analyzed`` tag."""
+
+
 class ParsedBuildURL(NamedTuple):
-    base_url: str       # e.g. https://host/tfs/Collection
-    project: str        # project GUID or name
+    base_url: str   # e.g. https://host/tfs/Collection
+    project: str    # project GUID or name
     build_id: str
 
 
@@ -243,9 +252,8 @@ def compact_log(
 def grep_errors(log_text: str, context: int = CONTEXT_LINES) -> str:
     """Return lines containing 'error' with `context` lines before and after each match.
 
-    This is the legacy extraction used before compaction was added.
-    ``compact_log`` supersedes it for the analyze endpoint; this function is
-    retained for tests and any callers that need the simpler behaviour.
+    Legacy extraction kept for tests and direct callers.
+    ``compact_log`` supersedes it in the analyze endpoint pipeline.
     """
     lines = log_text.splitlines()
     selected: set[int] = set()
@@ -254,7 +262,7 @@ def grep_errors(log_text: str, context: int = CONTEXT_LINES) -> str:
             for j in range(max(0, i - context), min(len(lines), i + context + 1)):
                 selected.add(j)
     if not selected:
-        return log_text  # return full log if no error keyword found
+        return log_text
     return "\n".join(lines[i] for i in sorted(selected))
 
 
@@ -268,37 +276,102 @@ class AzureDevOpsLogFetcher:
         self._token = token
         self._headers = _auth_headers(token)
 
-    async def fetch_error_logs(self, url: str) -> str:
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def fetch_build_info(self, url: str) -> tuple[ParsedBuildURL, dict]:
+        """Parse the URL and fetch the raw build object from Azure DevOps.
+
+        Returns the parsed URL and the full build JSON so the caller can
+        extract the pipeline definition ID without a second HTTP call.
+
+        Raises ``BuildURLParseError``, ``AzureAuthError``, or
+        ``BuildLogFetchError``.
         """
-        Validate URL, find the failed tasks in the build, fetch their logs,
-        and return a compacted error log ready for the AI.
+        parsed = parse_build_url(url)
+        api_base = f"{parsed.base_url}/{parsed.project}/_apis"
+        build = await self._get_json(f"{api_base}/build/builds/{parsed.build_id}?api-version=6.0")
+        return parsed, build
+
+    async def check_already_analyzed(self, parsed: ParsedBuildURL) -> bool:
+        """Return True if the build already carries the ``ai-analyzed`` tag.
+
+        This is the persistent, server-side idempotency check (feat3).  It
+        survives app restarts and is visible regardless of which client
+        originally triggered the analysis.
+        """
+        api_base = f"{parsed.base_url}/{parsed.project}/_apis"
+        url = f"{api_base}/build/builds/{parsed.build_id}/tags?api-version=6.0"
+        try:
+            tags = await self._get_json(url)
+        except (AzureAuthError, BuildLogFetchError):
+            # If we can't read tags, fail open — don't block the analysis.
+            logger.warning(
+                "build_tags_read_failed",
+                extra={"build_id": parsed.build_id},
+            )
+            return False
+        # The Tags GET endpoint returns a plain JSON array of strings.
+        tag_list: list[str] = tags if isinstance(tags, list) else tags.get("value", [])
+        return AI_ANALYZED_TAG in tag_list
+
+    async def mark_analyzed(self, parsed: ParsedBuildURL) -> None:
+        """Write the ``ai-analyzed`` tag to the build run on Azure DevOps.
+
+        Uses the Tags PUT endpoint:
+          PUT /_apis/build/builds/{buildId}/tags/{tag}?api-version=6.0
+
+        Failure to write the tag is logged but not raised — the AI response
+        has already been sent to the caller at this point.
+        """
+        api_base = f"{parsed.base_url}/{parsed.project}/_apis"
+        url = f"{api_base}/build/builds/{parsed.build_id}/tags/{AI_ANALYZED_TAG}?api-version=6.0"
+        try:
+            response = await self._client.put(url, headers=self._headers)
+            response.raise_for_status()
+            logger.info(
+                "build_tagged_analyzed",
+                extra={"build_id": parsed.build_id},
+            )
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.warning(
+                "build_tag_write_failed",
+                extra={"build_id": parsed.build_id, "error": str(exc)},
+            )
+
+    async def fetch_error_logs(self, url: str) -> str:
+        """Fetch and compact the failed-task logs for the given build URL.
+
+        Raises ``BuildURLParseError``, ``AzureAuthError``, or
+        ``BuildLogFetchError``.  Does NOT perform the already-analyzed check
+        or write the tag — the route handler owns those steps.
         """
         parsed = parse_build_url(url)
         api_base = f"{parsed.base_url}/{parsed.project}/_apis"
 
-        # 1. Validate token / fetch build details
+        # 1. Fetch build details (token validation happens implicitly here)
         build = await self._get_json(f"{api_base}/build/builds/{parsed.build_id}?api-version=6.0")
 
-        # 2. Fetch timeline (tasks + their results)
+        # 2. Fetch timeline
         timeline_url = (
             build.get("_links", {}).get("timeline", {}).get("href")
             or f"{api_base}/build/builds/{parsed.build_id}/timeline?api-version=6.0"
         )
         timeline = await self._get_json(timeline_url)
 
-        # 3. Find failed tasks (result == "failed")
+        # 3. Find failed tasks
         records = timeline.get("records", [])
         failed_tasks = [
             r for r in records
             if r.get("type") == "Task" and r.get("result") == "failed"
         ]
         if not failed_tasks:
-            # Fall back to any failed record
             failed_tasks = [r for r in records if r.get("result") == "failed"]
         if not failed_tasks:
             raise BuildLogFetchError("No failed tasks found in the build timeline")
 
-        # 4. Fetch and aggregate logs from all failed tasks, then compact each
+        # 4. Fetch and compact each failed task's log
         all_compacted: list[str] = []
         for task in failed_tasks:
             log_ref = task.get("log")
@@ -330,7 +403,11 @@ class AzureDevOpsLogFetcher:
         )
         return result
 
-    async def _get_json(self, url: str) -> dict:
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _get_json(self, url: str) -> dict | list:
         try:
             response = await self._client.get(url, headers=self._headers)
         except httpx.RequestError as exc:

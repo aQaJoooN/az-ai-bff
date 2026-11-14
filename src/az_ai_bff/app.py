@@ -9,25 +9,34 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from az_ai_bff.analyze import AzureAuthError, AzureDevOpsLogFetcher, BuildLogFetchError, BuildURLParseError, parse_build_url
+from az_ai_bff.analyze import (
+    AzureAuthError,
+    AzureDevOpsLogFetcher,
+    BuildLogFetchError,
+    BuildURLParseError,
+    parse_build_url,
+)
 from az_ai_bff.backend import AIBackendRegistry
 from az_ai_bff.chat import ChatService
-from az_ai_bff.concurrency import AISemaphore, BuildTracker, _Slot
+from az_ai_bff.concurrency import AISemaphore, PipelineInFlightTracker, _Slot
 from az_ai_bff.config import Settings
 from az_ai_bff.orchestration import AIOrchestrator
 from az_ai_bff.errors import APIError, install_exception_handlers
 from az_ai_bff.middleware import RequestContextMiddleware
-from az_ai_bff.models import AnalyzeRequest, AnalyzeResponse, ChatRequest, ChatResponse, ChatTurn, ErrorResponse, HealthResponse, StreamError, UnsupportedResponse
+from az_ai_bff.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ChatRequest,
+    ChatResponse,
+    ChatTurn,
+    ErrorResponse,
+    HealthResponse,
+    UnsupportedResponse,
+)
 from az_ai_bff.security import require_access_credential
 from az_ai_bff.token_management import TokenManager
 
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
-
-
-def _build_conflict_message(reason: str) -> str:
-    if reason == "build_already_analyzed":
-        return "This build has already been analyzed — open the existing result"
-    return "This build is already being analyzed — wait for the current request to finish"
 
 
 async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -61,7 +70,7 @@ def create_app(
             app.state.http_client = client
             app.state.chat_service = ChatService(orchestrator, token_manager)
             app.state.ai_semaphore = AISemaphore(resolved_settings.max_concurrent_ai_requests)
-            app.state.build_tracker = BuildTracker()
+            app.state.pipeline_tracker = PipelineInFlightTracker()
             app.state.started_at = time.monotonic()
             yield
 
@@ -107,12 +116,11 @@ def create_app(
         if not slot.ok:
             raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
         if stream:
-            sse_stream = _guarded_stream(
-                slot,
-                request.app.state.chat_service.create_stream(chat_request, request.state.request_id),
-            )
             return StreamingResponse(
-                sse_stream,
+                _guarded_stream(
+                    slot,
+                    request.app.state.chat_service.create_stream(chat_request, request.state.request_id),
+                ),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -154,25 +162,55 @@ def create_app(
         if analyze_request.message == "azure build pipeline improvement":
             return UnsupportedResponse(request_id=request_id)
 
-        # --- feat2 & feat3: per-build deduplication ---
-        # Parse the build URL early so we have the build_id before any HTTP call.
+        # --- Parse URL first so we have build_id and can call the AzDO API ---
         try:
             parsed_url = parse_build_url(str(analyze_request.data))
-        except Exception as exc:
+        except BuildURLParseError as exc:
             raise APIError(400, "invalid_build_url", str(exc)) from exc
 
-        build_slot = request.app.state.build_tracker.try_start(parsed_url.build_id)
-        if not build_slot.ok:
-            # build_already_processing  →  another request is in-flight right now
-            # build_already_analyzed    →  this run has already received an AI answer
-            status = 409
-            raise APIError(status, build_slot.reason, _build_conflict_message(build_slot.reason))
+        fetcher = AzureDevOpsLogFetcher(
+            request.app.state.http_client,
+            resolved_settings.azure_token.get_secret_value(),
+        )
 
-        with build_slot:
-            fetcher = AzureDevOpsLogFetcher(
-                request.app.state.http_client,
-                resolved_settings.azure_token.get_secret_value(),
+        # --- Fetch build object to get the pipeline definition ID (feat2) ---
+        # We need the definition ID to key the in-flight lock by pipeline, not
+        # by individual run.  This call also validates the token implicitly.
+        try:
+            _, build_obj = await fetcher.fetch_build_info(str(analyze_request.data))
+        except BuildURLParseError as exc:
+            raise APIError(400, "invalid_build_url", str(exc)) from exc
+        except AzureAuthError as exc:
+            raise APIError(502, "azure_auth_error", str(exc)) from exc
+        except BuildLogFetchError as exc:
+            raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
+
+        pipeline_id = str(build_obj.get("definition", {}).get("id", parsed_url.build_id))
+
+        # --- feat2: pipeline-level in-flight lock ---
+        # Prevents two runs of the same pipeline definition from being analyzed
+        # at the same time.  The lock is in-memory and resets on restart.
+        pipeline_slot = request.app.state.pipeline_tracker.try_start(pipeline_id)
+        if not pipeline_slot.ok:
+            raise APIError(
+                409,
+                "pipeline_already_processing",
+                "Another run of this pipeline is already being analyzed — wait for it to finish",
             )
+
+        with pipeline_slot:
+            # --- feat3: run-level idempotency via Azure DevOps tags ---
+            # Check whether the build already carries the "ai-analyzed" tag.
+            # This is persistent across restarts and visible from any client.
+            already_analyzed = await fetcher.check_already_analyzed(parsed_url)
+            if already_analyzed:
+                raise APIError(
+                    409,
+                    "build_already_analyzed",
+                    "This build run has already been analyzed — the result is available in the AI analyze page",
+                )
+
+            # --- Fetch and compact the actual error logs ---
             try:
                 error_logs = await fetcher.fetch_error_logs(str(analyze_request.data))
             except BuildURLParseError as exc:
@@ -182,16 +220,13 @@ def create_app(
             except BuildLogFetchError as exc:
                 raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
 
-            line_count = error_logs.count("\n") + 1
-            char_count = len(error_logs)
-
             _analyze_logger.info(
                 "analyze_fetched_log_stats",
                 extra={
                     "request_id": request_id,
                     "build_id": parsed_url.build_id,
-                    "log_line_count": line_count,
-                    "log_char_count": char_count,
+                    "log_line_count": error_logs.count("\n") + 1,
+                    "log_char_count": len(error_logs),
                 },
             )
 
@@ -216,24 +251,33 @@ def create_app(
                 ],
             )
 
+            # --- feat1: AI concurrency cap ---
             slot = await request.app.state.ai_semaphore.acquire()
             if not slot.ok:
                 raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
+
             if stream:
-                # Mark the build as done when the stream finishes.
-                async def _stream_and_complete() -> AsyncIterator[str]:
+                # For streaming: write the tag after the stream completes.
+                # Both the AI semaphore slot and the pipeline lock must be held
+                # for the full duration of the stream.
+                async def _stream_mark_and_release() -> AsyncIterator[str]:
                     try:
                         async for chunk in _guarded_stream(
                             slot,
                             request.app.state.chat_service.create_stream(log_chat_request, request_id),
                         ):
                             yield chunk
-                        build_slot.mark_done()
-                    except Exception:
-                        raise
+                        # Stream finished cleanly — write the tag
+                        await fetcher.mark_analyzed(parsed_url)
+                    finally:
+                        # Always release the pipeline lock
+                        pipeline_slot.__exit__(None, None, None)
 
+                # Transfer ownership of pipeline_slot to the generator.
+                # Prevent the outer `with pipeline_slot:` from double-releasing.
+                pipeline_slot.ok = False  # disarm the outer context manager
                 return StreamingResponse(
-                    _stream_and_complete(),
+                    _stream_mark_and_release(),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -241,11 +285,18 @@ def create_app(
                         "X-Request-ID": request_id,
                     },
                 )
+
+            # Non-streaming path
             async with slot:
                 ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
                 request.state.backend_id = ai_response.backend_id
-                build_slot.mark_done()
-                return AnalyzeResponse(answer=ai_response.answer, backend_id=ai_response.backend_id, request_id=request_id)
+                # Write tag on success; failure is logged but not propagated
+                await fetcher.mark_analyzed(parsed_url)
+                return AnalyzeResponse(
+                    answer=ai_response.answer,
+                    backend_id=ai_response.backend_id,
+                    request_id=request_id,
+                )
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is None:

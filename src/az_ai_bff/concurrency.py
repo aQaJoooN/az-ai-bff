@@ -1,24 +1,26 @@
 """Concurrency control for AI backend requests.
 
-Three independent mechanisms:
+Three independent mechanisms, applied in order inside the analyze route:
 
 AISemaphore
     Caps the number of simultaneous AI backend calls across all endpoints.
-    Excess requests are rejected immediately (non-blocking) with a 429.
+    Excess requests are rejected immediately (non-blocking) with 429.
 
-BuildTracker
-    Two guards keyed on build ID:
+PipelineInFlightTracker
+    In-memory guard keyed on the pipeline *definition* ID (not the run/build
+    ID).  While any run of a given pipeline is being analyzed, a second
+    request for any run of the same pipeline is rejected with 409
+    ``pipeline_already_processing``.  The lock is released whether the
+    analysis succeeds or fails, so errors always allow retries.
 
-    * in-flight set  — a build that is currently being processed cannot be
-      started again.  The second request gets 409 "build_already_processing".
-      The slot is released (via a context manager) when the work finishes,
-      regardless of success or failure.
+    Rationale: a pipeline definition can produce many runs.  Allowing two
+    different runs to be analyzed concurrently would create a race on writing
+    the ``ai-analyzed`` tag and would flood the AI backend.
 
-    * completed set  — once a build has received a successful AI analysis the
-      BFF records its ID permanently (for the lifetime of the process).  Any
-      future request for the same build ID is rejected with 409
-      "build_already_analyzed".  This prevents replay / curl simulation abuse
-      even after the original request has finished.
+The completed-run idempotency check is NOT stored here — it lives in
+``AzureDevOpsLogFetcher`` which reads and writes build tags directly on the
+Azure DevOps server, making it durable across app restarts and visible to
+every client.
 """
 
 import asyncio
@@ -82,7 +84,6 @@ class AISemaphore:
         if self._sem is None:
             return _Slot(ok=True, sem=None)
 
-        # _value is the number of free slots remaining.
         if self._sem._value > 0:
             await self._sem.acquire()
             logger.debug(
@@ -99,109 +100,82 @@ class AISemaphore:
 
 
 # ---------------------------------------------------------------------------
-# BuildTracker
+# PipelineInFlightTracker
 # ---------------------------------------------------------------------------
 
-class _BuildSlot:
-    """Returned by ``BuildTracker.try_start()``.
+class _PipelineSlot:
+    """Returned by ``PipelineInFlightTracker.try_start()``.
 
-    ``ok``      — False means the build is already in-flight or already done.
-    ``reason``  — error code string when ``ok`` is False.
+    ``ok``            — False if a run of this pipeline is already in-flight.
+    ``reason``        — error code when ``ok`` is False.
+    ``pipeline_id``   — the definition ID that was registered.
 
-    Use as a context manager around the entire analyze pipeline.  On exit it
-    removes the build from the in-flight set.  Call ``mark_done()`` when the
-    AI analysis completes successfully to move it to the completed set.
+    Use as a synchronous context manager.  The lock is released on exit
+    regardless of whether the analysis succeeded.
     """
 
-    __slots__ = ("ok", "reason", "_tracker", "_build_id", "_done")
+    __slots__ = ("ok", "reason", "pipeline_id", "_tracker")
 
     def __init__(
         self,
         ok: bool,
         reason: str,
-        tracker: "BuildTracker",
-        build_id: str,
+        pipeline_id: str,
+        tracker: "PipelineInFlightTracker",
     ) -> None:
         self.ok = ok
         self.reason = reason
+        self.pipeline_id = pipeline_id
         self._tracker = tracker
-        self._build_id = build_id
-        self._done = False
 
-    def mark_done(self) -> None:
-        """Call after a successful AI analysis to record the build as completed."""
-        if self.ok:
-            self._tracker._mark_completed(self._build_id)
-            self._done = True
-
-    def __enter__(self) -> "_BuildSlot":
+    def __enter__(self) -> "_PipelineSlot":
         return self
 
     def __exit__(self, *_) -> None:
         if self.ok:
-            self._tracker._release(self._build_id)
+            self._tracker._release(self.pipeline_id)
 
 
-class BuildTracker:
-    """Tracks build IDs that are in-flight or have already been analyzed.
+class PipelineInFlightTracker:
+    """Prevents two runs of the same pipeline definition from being analyzed
+    at the same time.
 
-    Thread-safety note: asyncio runs on a single thread; plain set operations
-    are atomic enough here.  No lock is needed.
+    Keyed on the pipeline *definition* ID, not the build/run ID.  This is
+    intentional: even if two different runs of the same pipeline are
+    requested concurrently, only one is allowed through at a time.
+
+    State is in-memory only — a restart clears all locks.  This is correct
+    because an in-flight analysis cannot survive a restart anyway.
     """
 
     def __init__(self) -> None:
         self._in_flight: set[str] = set()
-        self._completed: set[str] = set()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def try_start(self, pipeline_id: str) -> _PipelineSlot:
+        """Attempt to register *pipeline_id* as in-flight.
 
-    def try_start(self, build_id: str) -> _BuildSlot:
-        """Attempt to register *build_id* as in-flight.
-
-        Returns a :class:`_BuildSlot` whose ``.ok`` is True when the
-        registration succeeded.  ``ok=False`` means either the build is
-        currently being processed or it has already been analyzed.
+        Returns a :class:`_PipelineSlot` whose ``.ok`` is True when the
+        registration succeeded.
         """
-        if build_id in self._completed:
+        if pipeline_id in self._in_flight:
             logger.warning(
-                "build_already_analyzed",
-                extra={"build_id": build_id},
+                "pipeline_already_processing",
+                extra={"pipeline_id": pipeline_id},
             )
-            return _BuildSlot(ok=False, reason="build_already_analyzed", tracker=self, build_id=build_id)
-
-        if build_id in self._in_flight:
-            logger.warning(
-                "build_already_processing",
-                extra={"build_id": build_id},
+            return _PipelineSlot(
+                ok=False,
+                reason="pipeline_already_processing",
+                pipeline_id=pipeline_id,
+                tracker=self,
             )
-            return _BuildSlot(ok=False, reason="build_already_processing", tracker=self, build_id=build_id)
 
-        self._in_flight.add(build_id)
-        logger.debug("build_started", extra={"build_id": build_id})
-        return _BuildSlot(ok=True, reason="", tracker=self, build_id=build_id)
+        self._in_flight.add(pipeline_id)
+        logger.debug("pipeline_started", extra={"pipeline_id": pipeline_id})
+        return _PipelineSlot(ok=True, reason="", pipeline_id=pipeline_id, tracker=self)
 
-    # ------------------------------------------------------------------
-    # Internal helpers called by _BuildSlot
-    # ------------------------------------------------------------------
-
-    def _release(self, build_id: str) -> None:
-        self._in_flight.discard(build_id)
-
-    def _mark_completed(self, build_id: str) -> None:
-        self._in_flight.discard(build_id)
-        self._completed.add(build_id)
-        logger.info("build_analysis_completed", extra={"build_id": build_id})
-
-    # ------------------------------------------------------------------
-    # Inspection (tests / health endpoint)
-    # ------------------------------------------------------------------
+    def _release(self, pipeline_id: str) -> None:
+        self._in_flight.discard(pipeline_id)
 
     @property
     def in_flight(self) -> frozenset[str]:
         return frozenset(self._in_flight)
-
-    @property
-    def completed(self) -> frozenset[str]:
-        return frozenset(self._completed)
