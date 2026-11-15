@@ -1,26 +1,24 @@
 """Concurrency control for AI backend requests.
 
-Three independent mechanisms, applied in order inside the analyze route:
+Two independent mechanisms are applied in order inside the analyze route:
 
 AISemaphore
     Caps the number of simultaneous AI backend calls across all endpoints.
-    Excess requests are rejected immediately (non-blocking) with 429.
+    Excess requests are rejected immediately (non-blocking) with 429 so there
+    is never a hidden queue of slow builds backing up.
 
 PipelineInFlightTracker
-    In-memory guard keyed on the pipeline *definition* ID (not the run/build
-    ID).  While any run of a given pipeline is being analyzed, a second
-    request for any run of the same pipeline is rejected with 409
-    ``pipeline_already_processing``.  The lock is released whether the
-    analysis succeeds or fails, so errors always allow retries.
+    In-memory guard keyed on the pipeline *definition* ID.  While any run of a
+    given pipeline is being analyzed, a second request for the same pipeline is
+    rejected with 409 ``pipeline_already_processing``.  The lock is always
+    released on exit — errors allow retries.
 
-    Rationale: a pipeline definition can produce many runs.  Allowing two
-    different runs to be analyzed concurrently would create a race on writing
-    the ``ai-analyzed`` tag and would flood the AI backend.
+    Keying on definition ID (not run ID) prevents two parallel runs of the same
+    pipeline from racing to write the ``ai-analyzed`` tag or flooding the AI.
 
-The completed-run idempotency check is NOT stored here — it lives in
-``AzureDevOpsLogFetcher`` which reads and writes build tags directly on the
-Azure DevOps server, making it durable across app restarts and visible to
-every client.
+The completed-run idempotency check lives in ``AzureDevOpsLogFetcher``
+(``analyze.py``), which reads and writes build tags directly on Azure DevOps so
+the state is durable across app restarts and shared across all BFF instances.
 """
 
 import asyncio
@@ -34,10 +32,10 @@ logger = logging.getLogger("az_ai_bff.concurrency")
 # ---------------------------------------------------------------------------
 
 class _Slot:
-    """Returned by ``AISemaphore.acquire()``.
+    """Context manager returned by ``AISemaphore.acquire()``.
 
-    Use as an async context manager — the semaphore is released on exit only
-    when the slot was actually granted (``ok is True``).
+    Releases the semaphore on exit only when the slot was actually granted
+    (``ok is True``).  A rejected slot's ``__aexit__`` is a no-op.
     """
 
     __slots__ = ("ok", "_sem")
@@ -55,13 +53,12 @@ class _Slot:
 
 
 class AISemaphore:
-    """Concurrency cap for AI backend calls.
+    """Non-blocking concurrency cap for AI backend calls.
 
     Parameters
     ----------
     max_concurrent:
-        Maximum number of simultaneous AI backend requests.
-        ``0`` means unlimited — no semaphore is created.
+        Maximum simultaneous AI requests.  ``0`` means unlimited.
     """
 
     def __init__(self, max_concurrent: int) -> None:
@@ -77,13 +74,14 @@ class AISemaphore:
     async def acquire(self) -> _Slot:
         """Try to claim a slot without waiting.
 
-        Returns immediately.  Check ``.ok`` on the returned slot before
-        proceeding; use it as an ``async with`` context manager to guarantee
-        the slot is released.
+        Returns immediately.  Check ``.ok``; use the slot as an ``async with``
+        context manager to guarantee release.
         """
         if self._sem is None:
             return _Slot(ok=True, sem=None)
 
+        # _value is the internal free-slot counter of asyncio.Semaphore.
+        # We read it to avoid waiting — if zero, reject the request outright.
         if self._sem._value > 0:
             await self._sem.acquire()
             logger.debug(
@@ -92,10 +90,7 @@ class AISemaphore:
             )
             return _Slot(ok=True, sem=self._sem)
 
-        logger.warning(
-            "ai_semaphore_full",
-            extra={"max_concurrent": self._max},
-        )
+        logger.warning("ai_semaphore_full", extra={"max_concurrent": self._max})
         return _Slot(ok=False, sem=None)
 
 
@@ -104,14 +99,14 @@ class AISemaphore:
 # ---------------------------------------------------------------------------
 
 class _PipelineSlot:
-    """Returned by ``PipelineInFlightTracker.try_start()``.
+    """Context manager returned by ``PipelineInFlightTracker.try_start()``.
 
-    ``ok``            — False if a run of this pipeline is already in-flight.
-    ``reason``        — error code when ``ok`` is False.
-    ``pipeline_id``   — the definition ID that was registered.
+    ``ok``          — False if this pipeline is already in-flight.
+    ``reason``      — error code string when ``ok`` is False.
+    ``pipeline_id`` — the definition ID that was registered.
 
-    Use as a synchronous context manager.  The lock is released on exit
-    regardless of whether the analysis succeeded.
+    Use as a synchronous ``with`` context manager.  The lock is released on
+    exit regardless of whether the analysis succeeded or failed.
     """
 
     __slots__ = ("ok", "reason", "pipeline_id", "_tracker")
@@ -138,11 +133,7 @@ class _PipelineSlot:
 
 class PipelineInFlightTracker:
     """Prevents two runs of the same pipeline definition from being analyzed
-    at the same time.
-
-    Keyed on the pipeline *definition* ID, not the build/run ID.  This is
-    intentional: even if two different runs of the same pipeline are
-    requested concurrently, only one is allowed through at a time.
+    simultaneously.
 
     State is in-memory only — a restart clears all locks.  This is correct
     because an in-flight analysis cannot survive a restart anyway.
@@ -154,14 +145,11 @@ class PipelineInFlightTracker:
     def try_start(self, pipeline_id: str) -> _PipelineSlot:
         """Attempt to register *pipeline_id* as in-flight.
 
-        Returns a :class:`_PipelineSlot` whose ``.ok`` is True when the
-        registration succeeded.
+        Returns a slot with ``ok=True`` on success, or ``ok=False`` if the
+        pipeline is already being processed.
         """
         if pipeline_id in self._in_flight:
-            logger.warning(
-                "pipeline_already_processing",
-                extra={"pipeline_id": pipeline_id},
-            )
+            logger.warning("pipeline_already_processing", extra={"pipeline_id": pipeline_id})
             return _PipelineSlot(
                 ok=False,
                 reason="pipeline_already_processing",
@@ -178,4 +166,5 @@ class PipelineInFlightTracker:
 
     @property
     def in_flight(self) -> frozenset[str]:
+        """Read-only snapshot of currently in-flight pipeline IDs."""
         return frozenset(self._in_flight)

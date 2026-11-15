@@ -1,5 +1,6 @@
 """Azure DevOps on-premise build log fetcher, compactor, and analyzer."""
 
+import base64
 import logging
 import re
 from typing import NamedTuple
@@ -49,10 +50,6 @@ class AzureAuthError(Exception):
 
 class BuildLogFetchError(Exception):
     """Raised when log retrieval fails for any other reason."""
-
-
-class BuildAlreadyAnalyzedError(Exception):
-    """Raised when the build already has the ``ai-analyzed`` tag."""
 
 
 class ParsedBuildURL(NamedTuple):
@@ -109,7 +106,7 @@ def parse_build_url(url: str) -> ParsedBuildURL:
 
 
 def _auth_headers(token: str) -> dict[str, str]:
-    import base64
+    """Return HTTP Basic auth headers for an Azure DevOps PAT (empty username)."""
     encoded = base64.b64encode(f":{token}".encode()).decode()
     return {"Authorization": f"Basic {encoded}"}
 

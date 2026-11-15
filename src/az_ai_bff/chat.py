@@ -13,11 +13,17 @@ from az_ai_bff.token_management import TokenBudgetExceededError, TokenManager
 
 
 class ChatService:
+    """Bridges the token manager and the AI backend for a single chat turn.
+
+    Handles both the buffered (non-streaming) and SSE streaming paths.
+    """
+
     def __init__(self, backend: AIBackendClient, token_manager: TokenManager | None = None) -> None:
         self._backend = backend
         self._token_manager = token_manager
 
     async def create_response(self, request: ChatRequest, request_id: str) -> ChatResponse:
+        """Return a complete AI answer for *request*."""
         try:
             prepared = self._token_manager.prepare(request.message, request.context) if self._token_manager else None
         except TokenBudgetExceededError as error:
@@ -59,8 +65,10 @@ class ChatService:
     ) -> AsyncIterator[str]:
         """Yield SSE-formatted strings for a streaming chat response.
 
-        Always yields at least a ``StreamDone`` or ``StreamError`` event so the
-        client can detect completion even if no text chunks are produced.
+        Always yields at least one final event (``StreamDone`` or ``StreamError``)
+        so the client can detect completion even if no text chunks are produced.
+        Exceptions from the backend are caught and emitted as ``StreamError`` events
+        rather than propagated — the HTTP 200 is already sent at this point.
         """
         try:
             prepared = self._token_manager.prepare(request.message, request.context) if self._token_manager else None
@@ -72,6 +80,7 @@ class ChatService:
             ).to_sse()
             return
 
+        # AIOrchestrator does not expose backend_id directly; fall back to "primary".
         backend_id = self._backend.backend_id if hasattr(self._backend, "backend_id") else "primary"
 
         try:

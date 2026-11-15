@@ -12,27 +12,37 @@ from az_ai_bff.models import AIAnswer, ChatTurn
 logger = logging.getLogger("az_ai_bff.backend")
 
 
+# ---------------------------------------------------------------------------
+# Error hierarchy
+# ---------------------------------------------------------------------------
+
 class AIBackendError(Exception):
-    """Base failure returned by an AI backend adapter."""
+    """Base class for all AI backend failures."""
 
 
 class AIBackendRejectedError(AIBackendError):
-    pass
+    """Backend returned an HTTP error or an unusable response body."""
 
 
 class AIBackendUnavailableError(AIBackendError):
-    pass
+    """Backend could not be reached (network error)."""
 
 
 class AIBackendTimeoutError(AIBackendError):
-    pass
+    """Backend did not respond within the configured timeout."""
 
 
 class AllAIBackendsFailedError(AIBackendError):
-    pass
+    """Every configured backend failed during a multi-AI fan-out."""
 
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
 
 class AIBackendClient(Protocol):
+    """Structural interface that every AI backend adapter must satisfy."""
+
     @property
     def backend_id(self) -> str: ...
 
@@ -44,6 +54,8 @@ class AIBackendClient(Protocol):
         output_token_limit: int | None = None,
     ) -> AIAnswer: ...
 
+    # Note: implementations are async generators (not coroutines), so callers
+    # must use `async for` directly — do NOT await the return value.
     async def stream_generate(
         self,
         message: str,
@@ -53,10 +65,15 @@ class AIBackendClient(Protocol):
     ) -> AsyncIterator[str]: ...
 
 
+# ---------------------------------------------------------------------------
+# Internal response models (not part of the public API)
+# ---------------------------------------------------------------------------
+
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class _ProviderResponse(BaseModel):
+    """Expected shape of a 'simple' format backend response."""
     model_config = ConfigDict(extra="ignore")
 
     answer: NonEmptyText
@@ -84,7 +101,18 @@ class _OpenAIResponse(BaseModel):
     usage: _OpenAIUsage | None = None
 
 
+# ---------------------------------------------------------------------------
+# HTTP client
+# ---------------------------------------------------------------------------
+
 class HttpAIBackendClient:
+    """Sends requests to a single AI backend over HTTP.
+
+    Supports two wire formats:
+    - ``"simple"`` — custom JSON schema with ``answer`` / ``input_tokens`` / ``output_tokens``
+    - ``"openai"`` — OpenAI Chat Completions API, including SSE streaming and reasoning models
+    """
+
     def __init__(self, client: httpx.AsyncClient, settings: Settings | AIBackendSettings) -> None:
         self._client = client
         self._url = str(settings.backend_url)
@@ -93,7 +121,8 @@ class HttpAIBackendClient:
         self._backend_id = settings.backend_id
         self._format = settings.backend_format
         self._reasoning_mode: bool = settings.backend_reasoning_mode
-        # Global max_tokens cap — only available on the top-level Settings, not per-backend
+        # max_tokens is a global cap that only exists on the top-level Settings,
+        # not on AIBackendSettings, so getattr is used to handle both types.
         self._max_tokens: int | None = getattr(settings, "max_tokens", None)
 
     @property
@@ -107,6 +136,7 @@ class HttpAIBackendClient:
         context: Sequence[ChatTurn] = (),
         output_token_limit: int | None = None,
     ) -> AIAnswer:
+        """Send a single request and return the full AI answer."""
         payload = self._build_payload(message, conversation_id, context, output_token_limit)
         headers = {"Authorization": f"Bearer {self._credential}"} if self._credential else None
 
@@ -193,17 +223,16 @@ class HttpAIBackendClient:
         context: Sequence[ChatTurn] = (),
         output_token_limit: int | None = None,
     ) -> AsyncIterator[str]:
-        """Stream text chunks from the backend.
+        """Yield text chunks from the backend.
 
-        For the ``openai`` format, sends ``stream=true`` and parses SSE lines.
-        For the ``simple`` format, falls back to a buffered request and yields
-        the full answer as a single chunk — simple backends rarely support SSE.
+        For ``openai`` format: opens a streaming HTTP connection and parses SSE lines.
+        For ``simple`` format: falls back to a single buffered request and yields the
+        full answer as one chunk (simple backends rarely support SSE).
         """
         payload = self._build_payload(message, conversation_id, context, output_token_limit)
         headers = {"Authorization": f"Bearer {self._credential}"} if self._credential else {}
 
         if self._format != "openai":
-            # simple format: buffer and yield once
             answer = await self.generate(message, conversation_id, context, output_token_limit)
             yield answer.text
             return
@@ -253,11 +282,12 @@ class HttpAIBackendClient:
         context: Sequence[ChatTurn],
         output_token_limit: int | None,
     ) -> dict:
-        # Resolve the token limit: explicit caller value takes priority, then global cap
+        """Construct the request body for the configured backend format."""
+        # Explicit caller limit takes priority; fall back to the global cap.
         effective_limit = output_token_limit if output_token_limit is not None else self._max_tokens
 
         if self._format == "openai":
-            payload = {
+            payload: dict = {
                 "model": self._model,
                 "messages": [
                     *(turn.model_dump() for turn in context),
@@ -268,6 +298,7 @@ class HttpAIBackendClient:
                 payload["max_tokens"] = effective_limit
             return payload
 
+        # simple format — conversation_id and context are optional fields
         payload = {"model": self._model, "message": message}
         if conversation_id is not None:
             payload["conversation_id"] = conversation_id
@@ -278,13 +309,20 @@ class HttpAIBackendClient:
         return payload
 
 
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
 class AIBackendRegistry:
+    """Holds the primary backend and any additional enabled backends."""
+
     def __init__(self, primary: AIBackendClient, additional: list[AIBackendClient] | None = None) -> None:
         self.primary = primary
         self.enabled_backends = (primary, *(additional or []))
 
     @classmethod
     def from_settings(cls, client: httpx.AsyncClient, settings: Settings) -> "AIBackendRegistry":
+        """Build the registry from validated settings."""
         primary = HttpAIBackendClient(client, settings)
         additional = [
             HttpAIBackendClient(client, backend)

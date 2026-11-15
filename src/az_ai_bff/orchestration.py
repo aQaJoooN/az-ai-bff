@@ -6,9 +6,10 @@ from az_ai_bff.models import AIAnswer, ChatTurn
 
 
 class ResponseSynthesizer:
-    """Combines available provider answers into one provider-neutral answer."""
+    """Combines multiple AI answers into a single provider-neutral response."""
 
     def synthesize(self, answers: Sequence[AIAnswer]) -> AIAnswer:
+        """Join *answers* with double newlines and sum their token counts."""
         answer = AIAnswer(
             text="\n\n".join(answer.text for answer in answers),
             backend_id="multi",
@@ -25,6 +26,8 @@ class ResponseSynthesizer:
 
 
 class AIOrchestrator:
+    """Routes AI requests to one or more backends and synthesises the results."""
+
     def __init__(
         self,
         registry: AIBackendRegistry,

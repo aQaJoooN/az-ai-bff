@@ -11,18 +11,25 @@ logger = logging.getLogger("az_ai_bff.tokens")
 
 
 class TokenBudgetExceededError(ValueError):
-    """The user message cannot fit within the configured input budget."""
+    """The user message alone exceeds the configured input token budget."""
 
 
 @dataclass(frozen=True)
 class PreparedPrompt:
+    """Result of TokenManager.prepare() — fitted context and resolved limits."""
     context: tuple[ChatTurn, ...]
-    input_tokens: int | None
-    output_token_limit: int | None
+    input_tokens: int | None       # estimated input tokens, or None when budgeting is disabled
+    output_token_limit: int | None # limit to pass to the backend, or None when disabled
 
 
 class TokenManager:
-    """Estimates usage and fits optional conversation context to a token budget."""
+    """Character-based token estimator with optional context trimming.
+
+    Uses a configurable ``characters_per_token`` ratio (default 4.0, i.e.
+    4 characters ≈ 1 token) to estimate token counts without a real tokenizer.
+    When budgeting is disabled (``enabled=False``) all methods are no-ops and
+    the backend receives no token limits.
+    """
 
     def __init__(
         self,
@@ -38,6 +45,7 @@ class TokenManager:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "TokenManager":
+        """Build a TokenManager from validated settings."""
         return cls(
             enabled=settings.token_budget_enabled,
             input_token_budget=settings.input_token_budget,
@@ -46,18 +54,27 @@ class TokenManager:
         )
 
     def estimate_text(self, text: str) -> int:
+        """Estimate the number of tokens in *text* using the character ratio."""
         return math.ceil(len(text) / self.characters_per_token)
 
     def estimate_input(self, message: str, context: Sequence[ChatTurn]) -> int:
+        """Estimate total input tokens for *message* combined with *context*."""
         return self.estimate_text(message) + sum(self.estimate_text(turn.content) for turn in context)
 
     def fit_context(self, message: str, context: Sequence[ChatTurn]) -> tuple[ChatTurn, ...]:
+        """Drop the oldest context turns until the total fits within the budget."""
         fitted = list(context)
         while fitted and self.estimate_input(message, fitted) > self.input_token_budget:
             fitted.pop(0)
         return tuple(fitted)
 
     def prepare(self, message: str, context: Sequence[ChatTurn] = ()) -> PreparedPrompt:
+        """Validate *message* against the budget and trim *context* to fit.
+
+        Raises ``TokenBudgetExceededError`` if *message* alone is too long.
+        Returns a ``PreparedPrompt`` with fitted context and resolved output limit.
+        When budgeting is disabled, returns the full context with no limits.
+        """
         if not self.enabled:
             return PreparedPrompt(tuple(context), None, None)
         message_tokens = self.estimate_text(message)
@@ -71,6 +88,12 @@ class TokenManager:
         )
 
     def record_usage(self, request_id: str, answer: AIAnswer, estimated_input: int | None) -> None:
+        """Log structured token usage for the completed request.
+
+        Prefers backend-reported token counts when available; falls back to
+        the character-ratio estimate scaled by the number of backends used.
+        Does nothing when budgeting is disabled.
+        """
         if not self.enabled:
             return
         logger.info(

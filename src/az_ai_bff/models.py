@@ -10,6 +10,7 @@ Identifier = Annotated[TrimmedText, StringConstraints(max_length=128)]
 
 
 class APIModel(BaseModel):
+    """Base model that rejects unknown fields on all public request/response types."""
     model_config = ConfigDict(extra="forbid")
 
 
@@ -25,6 +26,9 @@ class ChatRequest(APIModel):
 
     @model_serializer
     def serialize(self) -> dict[str, str | None]:
+        # Intentionally omits `context` — context is passed directly to the
+        # backend at the call site and must not be round-tripped through
+        # serialisation (which could accidentally leak it into logs).
         return {"message": self.message, "conversation_id": self.conversation_id}
 
 
@@ -38,10 +42,11 @@ class AIResponse(APIModel):
 class ChatResponse(AIResponse):
     conversation_id: str | None
 
-    # Preserve stable field order: answer, conversation_id, backend_id, request_id
+    # ConfigDict is repeated here to satisfy pydantic's MRO for model_config.
     model_config = ConfigDict(extra="forbid")
 
     def model_dump(self, **kwargs):
+        # Enforce a stable field order: answer → conversation_id → backend_id → request_id
         d = super().model_dump(**kwargs)
         return {k: d[k] for k in ("answer", "conversation_id", "backend_id", "request_id")}
 
@@ -59,10 +64,12 @@ class HealthResponse(APIModel):
 
 
 class AIAnswer(APIModel):
+    """Internal model carrying the AI backend's raw answer and token counts."""
     text: MessageText
     backend_id: str
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    # Set by ResponseSynthesizer in multi-AI mode; used by TokenManager to scale estimates.
     _backend_count: int = PrivateAttr(default=1)
 
 
@@ -88,7 +95,9 @@ class UnsupportedResponse(APIModel):
     request_id: str
 
 
-# --- SSE streaming models ---
+# ---------------------------------------------------------------------------
+# SSE streaming models
+# ---------------------------------------------------------------------------
 
 class StreamChunk(BaseModel):
     """A single SSE data chunk sent during streaming."""
@@ -101,13 +110,12 @@ class StreamChunk(BaseModel):
 
 
 class StreamDone(BaseModel):
-    """Final SSE event sent when streaming is complete."""
+    """Final SSE event sent when streaming completes successfully."""
     type: Literal["done"] = "done"
     conversation_id: str | None
     backend_id: str
     request_id: str
-    # True when the build already carried the "ai-analyzed" tag before this
-    # request was processed.  The analysis still ran and answer is valid.
+    # True when the build already carried the "ai-analyzed" tag before this request.
     already_analyzed: bool = False
 
     def to_sse(self) -> str:
@@ -115,7 +123,7 @@ class StreamDone(BaseModel):
 
 
 class StreamError(BaseModel):
-    """SSE event sent when streaming fails mid-stream."""
+    """SSE event sent when streaming fails mid-flight."""
     type: Literal["error"] = "error"
     code: str
     message: str

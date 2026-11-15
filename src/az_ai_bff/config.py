@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _validate_secret(value: SecretStr | None) -> SecretStr | None:
+    """Treat blank strings the same as a missing secret — return None."""
     if value is None:
         return None
     if not value.get_secret_value().strip():
@@ -27,7 +28,7 @@ OptionalSecret = Annotated[SecretStr | None, AfterValidator(_validate_secret)]
 
 
 class AIBackendSettings(BaseModel):
-    """Configuration for an additional AI backend."""
+    """Configuration for a single additional AI backend in multi-AI mode."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -41,7 +42,7 @@ class AIBackendSettings(BaseModel):
 
 
 class Settings(BaseSettings):
-    """Validated runtime configuration loaded from AZ_AI_BFF_* variables."""
+    """Validated runtime configuration loaded from ``AZ_AI_BFF_*`` env vars."""
 
     model_config = SettingsConfigDict(
         env_prefix="AZ_AI_BFF_",
@@ -50,38 +51,55 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Server binding
     internal_host: RequiredText = "127.0.0.1"
     internal_port: int = Field(default=8000, ge=1, le=65535)
+
+    # Proxy trust and CORS
     trusted_proxy_addresses: list[RequiredText]
     allowed_extension_origins: list[AnyHttpUrl] = Field(default_factory=list)
+
+    # API access credential (optional — leave empty to disable auth)
     access_credential: OptionalSecret = None
+
+    # Primary AI backend
     backend_url: AnyHttpUrl
     backend_model: RequiredText
     backend_credential: OptionalSecret = None
     backend_id: RequiredText = "primary"
     backend_format: Literal["simple", "openai"] = "simple"
-    backend_reasoning_mode: bool = False  # set true for reasoning models that respond in reasoning_content
+    backend_reasoning_mode: bool = False  # set True for models that answer in reasoning_content
+
+    # Multi-AI fan-out (optional)
     multi_ai_enabled: bool = False
     additional_backends: list[AIBackendSettings] = Field(default_factory=list)
+
+    # Token budget (optional)
     token_budget_enabled: bool = False
     input_token_budget: int = Field(default=4096, ge=1)
     output_token_limit: int = Field(default=1024, ge=1)
     token_characters_per_token: float = Field(default=4.0, gt=0)
-    max_tokens: int | None = Field(default=None, ge=1)  # if set, appended to every AI request
+
+    # Global max_tokens cap — if set, appended to every AI request
+    max_tokens: int | None = Field(default=None, ge=1)
+
+    # Azure DevOps PAT for fetching build logs (required)
     azure_token: SecretStr
+
+    # HTTP timeouts
     connect_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     response_timeout_seconds: float = Field(gt=0, le=600)
-    # Maximum AI backend requests in-flight at the same time, across all
-    # endpoints.  0 disables the limit.
+
+    # Maximum simultaneous AI backend calls across all endpoints; 0 = unlimited
     max_concurrent_ai_requests: int = Field(default=5, ge=0)
-    # When True, every /api/v1/analyze request must include a valid
-    # client_signature field (MD5 of "host|project_id|run_id").
-    # Set False to disable the check (e.g. during development).
+
+    # When True, every /api/v1/analyze request must include a valid client_signature
+    # (MD5 of "host|project_id|run_id"). Set False only during development.
     require_client_signature: bool = True
-    # Controls behaviour when the build already carries the "ai-analyzed" tag:
-    #   True  — block the request and return 409 "build_already_analyzed"
-    #   False — run the analysis anyway and include "already_analyzed": true
-    #           in the response as a warning (default)
+
+    # Controls behaviour when the build already has the "ai-analyzed" tag:
+    #   True  — block with 409 "build_already_analyzed"
+    #   False — run the analysis and return already_analyzed=true as a warning
     enforce_analyzed_tag: bool = False
 
     @field_validator("trusted_proxy_addresses")
@@ -93,6 +111,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_backends(self) -> "Settings":
+        """Ensure backend IDs are unique and multi-AI mode has an enabled backend."""
         backend_ids = [self.backend_id, *(backend.backend_id for backend in self.additional_backends)]
         if len(backend_ids) != len(set(backend_ids)):
             raise ValueError("backend identifiers must be unique")

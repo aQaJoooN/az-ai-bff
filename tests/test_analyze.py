@@ -228,8 +228,8 @@ def test_analyze_returns_502_when_azure_token_invalid() -> None:
     assert response.json()["code"] == "azure_auth_error"
 
 
-def test_analyze_returns_503_when_azure_token_not_configured() -> None:
-    """azure_token is now required — Settings raises ValidationError at startup if missing."""
+def test_settings_raises_when_azure_token_missing() -> None:
+    """azure_token is required — Settings raises ValidationError at startup if missing."""
     from pydantic import ValidationError
     with pytest.raises(ValidationError) as exc_info:
         Settings(

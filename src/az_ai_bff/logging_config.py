@@ -4,7 +4,12 @@ from datetime import UTC, datetime
 
 
 class JsonFormatter(logging.Formatter):
-    """Serialize application records without messages or credentials."""
+    """Emit one JSON object per log record — no free-text messages or credentials.
+
+    Only the fields listed in ``_fields`` are included beyond the fixed
+    ``timestamp``, ``severity``, and ``event`` keys.  Any extra field not in
+    this list is silently dropped, which prevents accidental credential leakage.
+    """
 
     _fields = (
         "request_id",
@@ -44,7 +49,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    """Emit application logs as one JSON object per line."""
+    """Attach the JSON formatter to the root ``az_ai_bff`` logger."""
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     logger = logging.getLogger("az_ai_bff")

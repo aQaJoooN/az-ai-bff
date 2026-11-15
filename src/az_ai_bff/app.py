@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import json
 import logging
 import time
 from typing import Annotated, Any, AsyncIterator
@@ -275,7 +276,6 @@ def create_app(
                 # For streaming: inject already_analyzed into the StreamDone event,
                 # write the tag, and release the pipeline lock when finished.
                 async def _stream_mark_and_release() -> AsyncIterator[str]:
-                    import json as _json
                     try:
                         async for chunk in _guarded_stream(
                             slot,
@@ -284,12 +284,12 @@ def create_app(
                             # Intercept the StreamDone event to inject already_analyzed.
                             # All other events (chunk, error) are forwarded unchanged.
                             try:
-                                event_data = _json.loads(chunk.removeprefix("data:").strip().rstrip("\n"))
+                                event_data = json.loads(chunk.removeprefix("data:").strip().rstrip("\n"))
                                 if event_data.get("type") == "done":
                                     event_data["already_analyzed"] = already_analyzed
-                                    yield f"data: {_json.dumps(event_data)}\n\n"
+                                    yield f"data: {json.dumps(event_data)}\n\n"
                                     continue
-                            except (_json.JSONDecodeError, AttributeError):
+                            except (json.JSONDecodeError, AttributeError):
                                 pass
                             yield chunk
                         # Stream finished cleanly — write the tag
