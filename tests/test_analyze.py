@@ -9,7 +9,7 @@ from az_ai_bff.analyze import (
     AzureAuthError,
     AzureDevOpsLogFetcher,
     BuildURLParseError,
-    grep_errors,
+    compact_log,
     parse_build_url,
 )
 from az_ai_bff.app import create_app
@@ -91,15 +91,15 @@ def test_parse_build_url_rejects_invalid_urls() -> None:
 
 
 # ---------------------------------------------------------------------------
-# grep_errors
+# compact_log
 # ---------------------------------------------------------------------------
 
-def test_grep_errors_returns_context_lines() -> None:
+def test_compact_log_keeps_error_lines_and_context() -> None:
     lines = [f"line {i}" for i in range(20)]
     lines[10] = "line 10 ERROR happened"
     log = "\n".join(lines)
 
-    result = grep_errors(log, context=2)
+    result = compact_log(log, context_lines=2)
     result_lines = result.splitlines()
 
     assert "line 10 ERROR happened" in result_lines
@@ -108,9 +108,33 @@ def test_grep_errors_returns_context_lines() -> None:
     assert "line 0" not in result_lines  # outside context
 
 
-def test_grep_errors_returns_full_log_when_no_errors() -> None:
+def test_compact_log_returns_cleaned_log_when_no_signal() -> None:
     log = "all good\nnothing wrong here"
-    assert grep_errors(log) == log
+    result = compact_log(log)
+    assert "all good" in result
+    assert "nothing wrong here" in result
+
+
+def test_compact_log_strips_boilerplate() -> None:
+    log = "##[section]Starting: Build\nactual error here\n##[endgroup]"
+    result = compact_log(log)
+    assert "##[section]" not in result
+    assert "##[endgroup]" not in result
+    assert "actual error here" in result
+
+
+def test_compact_log_collapses_duplicate_lines() -> None:
+    log = "warning: retrying\nwarning: retrying\nwarning: retrying\ndone"
+    result = compact_log(log)
+    assert "[×3]" in result
+    assert result.count("warning: retrying") == 1
+
+
+def test_compact_log_truncates_to_budget() -> None:
+    log = "\n".join(f"error line {i}" for i in range(1000))
+    result = compact_log(log, char_budget=200)
+    assert len(result) <= 260  # budget + truncation note (up to ~60 chars)
+    assert "truncated" in result
 
 
 # ---------------------------------------------------------------------------

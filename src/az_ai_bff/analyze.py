@@ -1,6 +1,7 @@
 """Azure DevOps on-premise build log fetcher, compactor, and analyzer."""
 
 import base64
+import hashlib
 import logging
 import re
 from typing import NamedTuple
@@ -33,6 +34,13 @@ _BUILD_API_RE = re.compile(
 )
 
 CONTEXT_LINES = 5
+
+# Maximum characters for a single task's compacted log.
+_PER_TASK_CHAR_BUDGET = 8_000
+
+# Hard ceiling on the total characters sent to the AI across all failed tasks.
+# Keeps the full prompt well inside typical 32 K-token context windows.
+_GLOBAL_CHAR_BUDGET = 20_000
 
 # Tag written to a build run when AI analysis completes successfully.
 # Reading this tag back is how the BFF detects that a run was already analyzed,
@@ -146,6 +154,27 @@ _BOILERPLATE_RES = [
         r"^agent machine name",
         r"^environment:",
         r"^\s*$",                                   # blank lines
+        # Additional scaffolding patterns
+        r"^worker process started",
+        r"^running on:",
+        r"^image version:",
+        r"^system\.jobid",
+        r"^system\.definitionid",
+        r"^system\.teamproject",
+        r"^build\.buildid",
+        r"^build\.buildnumber",
+        r"^build\.repository",
+        r"^checkout\s+\S+@",                        # Checkout repo@branch
+        r"^syncing repository:",
+        r"^cleaning up task groups",
+        r"^post-job:",
+        r"^##\[warning\]Agent\.TempDirectory",
+        r"^download task:",
+        r"^found no cached version",
+        r"^attempting to get",                      # cache-miss noise
+        r"^cache restored from key",
+        r"^saving cache",
+        r"^cache hit",
     ]
 ]
 
@@ -164,7 +193,7 @@ _FRAME_RE = re.compile(r"^\s+at\s+\S|^\s+File\s+\"", re.IGNORECASE)
 
 def compact_log(
     log_text: str,
-    char_budget: int = 24_000,
+    char_budget: int = _PER_TASK_CHAR_BUDGET,
     context_lines: int = 3,
 ) -> str:
     """Return a compacted, AI-friendly version of *log_text*.
@@ -246,21 +275,13 @@ def compact_log(
     return "\n".join(output_lines)
 
 
-def grep_errors(log_text: str, context: int = CONTEXT_LINES) -> str:
-    """Return lines containing 'error' with `context` lines before and after each match.
+def _content_hash(text: str) -> str:
+    """Return a short hash of *text* used for cross-task deduplication."""
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
-    Legacy extraction kept for tests and direct callers.
-    ``compact_log`` supersedes it in the analyze endpoint pipeline.
-    """
-    lines = log_text.splitlines()
-    selected: set[int] = set()
-    for i, line in enumerate(lines):
-        if "error" in line.lower():
-            for j in range(max(0, i - context), min(len(lines), i + context + 1)):
-                selected.add(j)
-    if not selected:
-        return log_text
-    return "\n".join(lines[i] for i in sorted(selected))
+
+# grep_errors was removed — compact_log supersedes it.
+# If you need it, use: compact_log(log_text, char_budget=<n>)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +364,12 @@ class AzureDevOpsLogFetcher:
         Raises ``BuildURLParseError``, ``AzureAuthError``, or
         ``BuildLogFetchError``.  Does NOT perform the already-analyzed check
         or write the tag — the route handler owns those steps.
+
+        Multi-task handling:
+        - Each task's log is compacted independently with ``_PER_TASK_CHAR_BUDGET``.
+        - Duplicate compacted blocks (same content across tasks) are skipped.
+        - The joined result is then hard-capped to ``_GLOBAL_CHAR_BUDGET`` so
+          the AI never receives more than that regardless of how many tasks failed.
         """
         parsed = parse_build_url(url)
         api_base = f"{parsed.base_url}/{parsed.project}/_apis"
@@ -368,8 +395,10 @@ class AzureDevOpsLogFetcher:
         if not failed_tasks:
             raise BuildLogFetchError("No failed tasks found in the build timeline")
 
-        # 4. Fetch and compact each failed task's log
+        # 4. Fetch, compact, and deduplicate each failed task's log
         all_compacted: list[str] = []
+        seen_hashes: set[str] = set()
+
         for task in failed_tasks:
             log_ref = task.get("log")
             if not log_ref:
@@ -383,22 +412,43 @@ class AzureDevOpsLogFetcher:
 
             log_text = await self._get_text(log_url)
             compacted = compact_log(log_text)
+
+            # Skip tasks whose compacted content is identical to one already included.
+            content_hash = _content_hash(compacted)
+            if content_hash in seen_hashes:
+                logger.debug(
+                    "analyze_duplicate_task_log_skipped",
+                    extra={"build_id": parsed.build_id, "task": task.get("name")},
+                )
+                continue
+            seen_hashes.add(content_hash)
+
             task_name = task.get("name", "unknown task")
             all_compacted.append(f"=== {task_name} ===\n{compacted}")
 
         if not all_compacted:
             raise BuildLogFetchError("Failed tasks found but no logs could be retrieved")
 
-        result = "\n\n".join(all_compacted)
+        # 5. Apply global character budget across all tasks
+        joined = "\n\n".join(all_compacted)
+        if len(joined) > _GLOBAL_CHAR_BUDGET:
+            joined = joined[:_GLOBAL_CHAR_BUDGET]
+            # Cut cleanly at the last newline so we don't split mid-line
+            last_nl = joined.rfind("\n")
+            if last_nl > 0:
+                joined = joined[:last_nl]
+            joined += f"\n[... truncated to {_GLOBAL_CHAR_BUDGET} chars global budget]"
+
         logger.info(
             "analyze_logs_fetched",
             extra={
                 "build_url": url,
                 "build_id": parsed.build_id,
                 "failed_tasks": len(all_compacted),
+                "log_char_count": len(joined),
             },
         )
-        return result
+        return joined
 
     # ------------------------------------------------------------------
     # Internal helpers

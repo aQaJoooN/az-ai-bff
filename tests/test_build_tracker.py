@@ -9,7 +9,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from az_ai_bff.analyze import AI_ANALYZED_TAG, compact_log, grep_errors
+from az_ai_bff.analyze import AI_ANALYZED_TAG, compact_log
 from az_ai_bff.app import create_app
 from az_ai_bff.concurrency import PipelineInFlightTracker
 from az_ai_bff.config import Settings
