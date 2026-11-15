@@ -210,14 +210,19 @@ def create_app(
 
         with pipeline_slot:
             # --- feat3: run-level idempotency via Azure DevOps tags ---
-            # Check whether the build already carries the "ai-analyzed" tag.
-            # This is persistent across restarts and visible from any client.
             already_analyzed = await fetcher.check_already_analyzed(parsed_url)
             if already_analyzed:
-                raise APIError(
-                    409,
-                    "build_already_analyzed",
-                    "This build run has already been analyzed — the result is available in the AI analyze page",
+                if resolved_settings.enforce_analyzed_tag:
+                    # Strict mode: block and return 409.
+                    raise APIError(
+                        409,
+                        "build_already_analyzed",
+                        "This build run has already been analyzed — the result is available in the AI analyze page",
+                    )
+                # Warning mode: continue but flag the response.
+                _analyze_logger.warning(
+                    "build_already_analyzed_warning",
+                    extra={"request_id": request_id, "build_id": parsed_url.build_id},
                 )
 
             # --- Fetch and compact the actual error logs ---
@@ -267,15 +272,25 @@ def create_app(
                 raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
 
             if stream:
-                # For streaming: write the tag after the stream completes.
-                # Both the AI semaphore slot and the pipeline lock must be held
-                # for the full duration of the stream.
+                # For streaming: inject already_analyzed into the StreamDone event,
+                # write the tag, and release the pipeline lock when finished.
                 async def _stream_mark_and_release() -> AsyncIterator[str]:
+                    import json as _json
                     try:
                         async for chunk in _guarded_stream(
                             slot,
                             request.app.state.chat_service.create_stream(log_chat_request, request_id),
                         ):
+                            # Intercept the StreamDone event to inject already_analyzed.
+                            # All other events (chunk, error) are forwarded unchanged.
+                            try:
+                                event_data = _json.loads(chunk.removeprefix("data:").strip().rstrip("\n"))
+                                if event_data.get("type") == "done":
+                                    event_data["already_analyzed"] = already_analyzed
+                                    yield f"data: {_json.dumps(event_data)}\n\n"
+                                    continue
+                            except (_json.JSONDecodeError, AttributeError):
+                                pass
                             yield chunk
                         # Stream finished cleanly — write the tag
                         await fetcher.mark_analyzed(parsed_url)
@@ -300,12 +315,12 @@ def create_app(
             async with slot:
                 ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
                 request.state.backend_id = ai_response.backend_id
-                # Write tag on success; failure is logged but not propagated
                 await fetcher.mark_analyzed(parsed_url)
                 return AnalyzeResponse(
                     answer=ai_response.answer,
                     backend_id=ai_response.backend_id,
                     request_id=request_id,
+                    already_analyzed=already_analyzed,
                 )
 
     def custom_openapi() -> dict[str, Any]:

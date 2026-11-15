@@ -10,7 +10,7 @@ A FastAPI service that sits between the [Azure DevOps Build AI Reviewer](https:/
 |---------|-------------|
 | **AI concurrency cap** | Configurable limit on simultaneous AI requests across all endpoints. Excess requests receive 429 immediately. |
 | **Build deduplication** | Each build ID is processed at most once at a time. A duplicate in-flight request receives 409. |
-| **Completed-run idempotency** | Once a build receives a successful AI analysis, the BFF refuses to analyze it again. Prevents curl/replay abuse. |
+| **Completed-run idempotency** | Before analyzing, the BFF checks for the `ai-analyzed` tag on the build. Behaviour is configurable: strict mode blocks with 409, warning mode (default) runs the analysis and returns `"already_analyzed": true`. |
 | **Client signature** | Every `/api/v1/analyze` request must include a 32-char MD5 signature derived from the build URL. Requests without a valid signature are rejected with 401. |
 | **Log compaction** | Before sending to the AI, logs are stripped of ANSI codes, timestamps, boilerplate, and duplicate lines. Only error/warning/exception lines and their surrounding context are kept. |
 | **SSE streaming** | Both endpoints support `?stream=true` for server-sent event streaming. |
@@ -167,7 +167,7 @@ curl https://your-bff-host/api/v1/analyze \
 | 401 | `unauthorized` | Missing or wrong `Authorization` header |
 | 401 | `invalid_signature` | `client_signature` is missing or does not match the build URL |
 | 409 | `pipeline_already_processing` | A run of this pipeline definition is currently being analyzed |
-| 409 | `build_already_analyzed` | This run already has an AI result (`ai-analyzed` tag present in Azure DevOps) |
+| 409 | `build_already_analyzed` | Tag present and `ENFORCE_ANALYZED_TAG=true` — this run was already analyzed |
 | 429 | `rate_limit_exceeded` | AI concurrency cap reached — retry later |
 | 502 | `azure_auth_error` | Azure DevOps token is invalid or lacks permissions |
 | 502 | `azure_log_fetch_error` | Azure DevOps API returned an unexpected error |
@@ -261,6 +261,8 @@ All variables are prefixed `AZ_AI_BFF_`. Copy `.env.example` to `.env` and edit.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_CONCURRENT_AI_REQUESTS` | `5` | Maximum simultaneous AI backend calls across all endpoints. The next request over the limit receives **429**. Set to `0` to disable. |
+| `REQUIRE_CLIENT_SIGNATURE` | `true` | When `true`, every `/api/v1/analyze` request must include a valid `client_signature` field. Set `false` during development. |
+| `ENFORCE_ANALYZED_TAG` | `false` | When `true`, a build already tagged `ai-analyzed` is blocked with **409**. When `false`, the analysis runs and the response includes `already_analyzed: true` as a warning. |
 
 The concurrency limit applies globally — `/api/v1/chat` and `/api/v1/analyze` share the same pool. Five concurrent users means the sixth gets a 429 and should retry.
 
@@ -312,28 +314,20 @@ The same pipeline can produce many runs. Allowing two different runs of the same
 
 ### 3. Completed-Run Idempotency via Azure DevOps Tags
 
-The old in-memory `_completed` set had two problems: it reset on restart, and a curl user bypassing the UI could lock a pipeline forever without the analysis ever appearing in the UI.
+The `ai-analyzed` tag is written to a build run by `POST /api/v1/analyze/confirm`, which the UI extension calls after successfully displaying the result.
 
-The new mechanism writes a **build tag** directly to the Azure DevOps run when analysis completes:
+Before processing any analyze request, the BFF reads the tags for that run. If `ai-analyzed` is present, behaviour is controlled by `AZ_AI_BFF_ENFORCE_ANALYZED_TAG`:
 
-```
-PUT /_apis/build/builds/{buildId}/tags/ai-analyzed?api-version=6.0
-```
+| Setting | Tag absent | Tag present |
+|---------|-----------|-------------|
+| `false` (default) | Analysis runs, `already_analyzed: false` | Analysis still runs, `already_analyzed: true` in response as a warning |
+| `true` | Analysis runs, `already_analyzed: false` | Request blocked, **409 `build_already_analyzed`** |
 
-Before processing any request, the BFF reads the tags for that run:
+**Warning mode (`false`, default)** is the safer choice when tag state may be uncertain — restarts, curl tests that never confirmed, or stale tags won't lock real users out.
 
-```
-GET /_apis/build/builds/{buildId}/tags?api-version=6.0
-```
+**Strict mode (`true`)** is appropriate when you are confident the tag is only written via `/confirm` after a successful UI display, and you want to prevent duplicate AI calls entirely.
 
-If `ai-analyzed` is present → **409 `build_already_analyzed`**.
-
-This state is:
-- **Durable** — survives app restarts
-- **Shared** — visible to every client and every BFF instance
-- **Source-of-truth is Azure DevOps** — not the BFF process memory
-
-If the tags endpoint returns an error (503, network failure), the check **fails open** — the analysis is allowed to proceed rather than blocking indefinitely.
+The tag state is durable across restarts and shared across all BFF instances — the source of truth is Azure DevOps itself. If the tags read endpoint fails, the check fails open and analysis proceeds normally.
 
 ### 4. Log Compaction
 

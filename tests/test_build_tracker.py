@@ -215,8 +215,8 @@ class TestPipelineTrackerHTTP:
 # ===========================================================================
 
 class TestTagBasedIdempotency:
-    def test_already_analyzed_tag_returns_409(self):
-        """If the build already has 'ai-analyzed' tag → 409 build_already_analyzed."""
+    def test_already_analyzed_tag_returns_warning_not_error(self):
+        """If the build already has 'ai-analyzed' tag → 200 with already_analyzed=True warning."""
         app = create_app(
             _make_settings(),
             http_transport=httpx.MockTransport(
@@ -229,11 +229,12 @@ class TestTagBasedIdempotency:
                 json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
                 headers=AUTH,
             )
-        assert response.status_code == 409
-        assert response.json()["code"] == "build_already_analyzed"
+        assert response.status_code == 200
+        assert response.json()["already_analyzed"] is True
+        assert "answer" in response.json()  # analysis still ran
 
     def test_no_tag_allows_analysis(self):
-        """Build with no tags proceeds to full analysis."""
+        """Build with no tags proceeds to full analysis with already_analyzed=False."""
         app = create_app(
             _make_settings(),
             http_transport=httpx.MockTransport(
@@ -247,6 +248,7 @@ class TestTagBasedIdempotency:
                 headers=AUTH,
             )
         assert response.status_code == 200
+        assert response.json()["already_analyzed"] is False
 
     def test_tag_is_written_after_successful_analysis(self):
         """PUT tag call must be made when AI analysis succeeds."""
@@ -315,6 +317,79 @@ class TestTagBasedIdempotency:
             )
         # Should proceed normally despite tag read failure
         assert response.status_code == 200
+
+
+# ===========================================================================
+# feat3 — enforce_analyzed_tag config (strict vs warning mode)
+# ===========================================================================
+
+class TestEnforceAnalyzedTagConfig:
+
+    def _make_strict_settings(self) -> Settings:
+        return Settings(
+            trusted_proxy_addresses=["127.0.0.1"],
+            access_credential="extension-secret",
+            backend_url="https://ai.example.test/v1/chat",
+            backend_model="example-model",
+            backend_credential="backend-secret",
+            response_timeout_seconds=30,
+            azure_token="valid-pat",
+            require_client_signature=False,
+            enforce_analyzed_tag=True,   # strict mode
+        )
+
+    def test_strict_mode_blocks_with_409(self):
+        """enforce_analyzed_tag=True → 409 when ai-analyzed tag is present."""
+        app = create_app(
+            self._make_strict_settings(),
+            http_transport=httpx.MockTransport(
+                _make_combined_handler(tags=[AI_ANALYZED_TAG])
+            ),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/analyze",
+                json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
+                headers=AUTH,
+            )
+        assert response.status_code == 409
+        assert response.json()["code"] == "build_already_analyzed"
+        assert "request_id" in response.json()
+
+    def test_strict_mode_allows_when_no_tag(self):
+        """enforce_analyzed_tag=True with no tag → analysis runs normally."""
+        app = create_app(
+            self._make_strict_settings(),
+            http_transport=httpx.MockTransport(
+                _make_combined_handler(tags=[])
+            ),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/analyze",
+                json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
+                headers=AUTH,
+            )
+        assert response.status_code == 200
+        assert response.json()["already_analyzed"] is False
+
+    def test_warning_mode_runs_analysis_with_flag(self):
+        """enforce_analyzed_tag=False (default) → 200 with already_analyzed=True."""
+        app = create_app(
+            _make_settings(),   # enforce_analyzed_tag defaults to False
+            http_transport=httpx.MockTransport(
+                _make_combined_handler(tags=[AI_ANALYZED_TAG])
+            ),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/analyze",
+                json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
+                headers=AUTH,
+            )
+        assert response.status_code == 200
+        assert response.json()["already_analyzed"] is True
+        assert "answer" in response.json()
 
 
 # ===========================================================================

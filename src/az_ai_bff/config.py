@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # client_signature field (MD5 of "host|project_id|run_id").
     # Set False to disable the check (e.g. during development).
     require_client_signature: bool = True
+    # Controls behaviour when the build already carries the "ai-analyzed" tag:
+    #   True  — block the request and return 409 "build_already_analyzed"
+    #   False — run the analysis anyway and include "already_analyzed": true
+    #           in the response as a warning (default)
+    enforce_analyzed_tag: bool = False
 
     @field_validator("trusted_proxy_addresses")
     @classmethod
