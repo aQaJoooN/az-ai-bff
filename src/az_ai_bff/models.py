@@ -88,6 +88,8 @@ class AnalyzeResponse(AIResponse):
     # request was processed.  The analysis still ran and answer is valid — this
     # is a warning to the client that a previous result may already exist.
     already_analyzed: bool = False
+    # ISO-8601 UTC timestamp of when the AI printed the analysis result.
+    analyzed_at: str | None = None
 
 
 class UnsupportedResponse(APIModel):
@@ -117,6 +119,8 @@ class StreamDone(BaseModel):
     request_id: str
     # True when the build already carried the "ai-analyzed" tag before this request.
     already_analyzed: bool = False
+    # ISO-8601 UTC timestamp of when the AI printed the analysis result.
+    analyzed_at: str | None = None
 
     def to_sse(self) -> str:
         return f"data: {json.dumps(self.model_dump())}\n\n"

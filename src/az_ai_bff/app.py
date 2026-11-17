@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import json
 import logging
 import time
@@ -291,6 +292,7 @@ def create_app(
                     except AgenticLoopError as exc:
                         raise APIError(502, "ai_backend_error", str(exc)) from exc
 
+                    analyzed_at = datetime.now(timezone.utc).isoformat()
                     request.state.backend_id = resolved_settings.backend_id
                     await fetcher.mark_analyzed(parsed_url)
                     return AnalyzeResponse(
@@ -298,6 +300,7 @@ def create_app(
                         backend_id=resolved_settings.backend_id,
                         request_id=request_id,
                         already_analyzed=already_analyzed,
+                        analyzed_at=analyzed_at,
                     )
 
             # ================================================================
@@ -330,20 +333,30 @@ def create_app(
             )
 
             if stream:
-                # For streaming: inject already_analyzed into the StreamDone event,
-                # write the tag, and release the pipeline lock when finished.
+                # For streaming: inject already_analyzed and analyzed_at into the
+                # StreamDone event, write the tag, and release the pipeline lock
+                # when finished.
+                #
+                # Capture tracker + pipeline_id so the generator can release
+                # the lock in its own finally block.  Disarm the outer
+                # `with pipeline_slot:` to prevent a double-release.
+                _tracker = request.app.state.pipeline_tracker
+                _pipeline_id = pipeline_slot.pipeline_id
+                pipeline_slot.disarm()
+
                 async def _stream_mark_and_release() -> AsyncIterator[str]:
                     try:
                         async for chunk in _guarded_stream(
                             slot,
                             request.app.state.chat_service.create_stream(log_chat_request, request_id),
                         ):
-                            # Intercept the StreamDone event to inject already_analyzed.
-                            # All other events (chunk, error) are forwarded unchanged.
+                            # Intercept the StreamDone event to inject already_analyzed
+                            # and analyzed_at.  All other events (chunk, error) forwarded unchanged.
                             try:
                                 event_data = json.loads(chunk.removeprefix("data:").strip().rstrip("\n"))
                                 if event_data.get("type") == "done":
                                     event_data["already_analyzed"] = already_analyzed
+                                    event_data["analyzed_at"] = datetime.now(timezone.utc).isoformat()
                                     yield f"data: {json.dumps(event_data)}\n\n"
                                     continue
                             except (json.JSONDecodeError, AttributeError):
@@ -352,12 +365,10 @@ def create_app(
                         # Stream finished cleanly — write the tag
                         await fetcher.mark_analyzed(parsed_url)
                     finally:
-                        # Always release the pipeline lock
-                        pipeline_slot.__exit__(None, None, None)
+                        # Always release the pipeline lock — covers clean finish,
+                        # errors mid-stream, and generator garbage collection.
+                        _tracker._release(_pipeline_id)
 
-                # Transfer ownership of pipeline_slot to the generator.
-                # Prevent the outer `with pipeline_slot:` from double-releasing.
-                pipeline_slot.ok = False  # disarm the outer context manager
                 return StreamingResponse(
                     _stream_mark_and_release(),
                     media_type="text/event-stream",
@@ -371,6 +382,7 @@ def create_app(
             # Non-streaming path
             async with slot:
                 ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
+                analyzed_at = datetime.now(timezone.utc).isoformat()
                 request.state.backend_id = ai_response.backend_id
                 await fetcher.mark_analyzed(parsed_url)
                 return AnalyzeResponse(
@@ -378,6 +390,7 @@ def create_app(
                     backend_id=ai_response.backend_id,
                     request_id=request_id,
                     already_analyzed=already_analyzed,
+                    analyzed_at=analyzed_at,
                 )
 
     def custom_openapi() -> dict[str, Any]:

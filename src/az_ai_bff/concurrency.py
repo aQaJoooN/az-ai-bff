@@ -130,6 +130,15 @@ class _PipelineSlot:
         if self.ok:
             self._tracker._release(self.pipeline_id)
 
+    def disarm(self) -> None:
+        """Prevent this slot's ``__exit__`` from releasing the lock.
+
+        Call this when ownership of the release is being transferred to another
+        scope (e.g. a streaming generator that will call ``_tracker._release``
+        directly in its own ``finally`` block).
+        """
+        self.ok = False
+
 
 class PipelineInFlightTracker:
     """Prevents two runs of the same pipeline definition from being analyzed
