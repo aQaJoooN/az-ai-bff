@@ -34,8 +34,6 @@ from az_ai_bff.models import (
     ChatTurn,
     ErrorResponse,
     HealthResponse,
-    PipelineNotDoneResponse,
-    UnsupportedResponse,
 )
 from az_ai_bff.security import require_access_credential, verify_client_signature
 from az_ai_bff.token_management import TokenManager
@@ -183,7 +181,7 @@ def create_app(
 
     @app.post(
         "/api/v1/analyze",
-        response_model=AnalyzeResponse | UnsupportedResponse | PipelineNotDoneResponse,
+        response_model=AnalyzeResponse,
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
@@ -201,14 +199,14 @@ def create_app(
         request: Request,
         _: Annotated[None, Depends(require_access_credential)],
         stream: bool = Query(default=False, description="Stream the AI analysis as SSE"),
-    ) -> AnalyzeResponse | UnsupportedResponse | PipelineNotDoneResponse | StreamingResponse:
+    ) -> AnalyzeResponse | StreamingResponse:
         request_id = request.state.request_id
 
         if analyze_request.type == "super":
-            return UnsupportedResponse(request_id=request_id)
+            raise APIError(400, "unsupported", "This analysis type is not supported")
 
         if analyze_request.message == "azure build pipeline improvement":
-            return UnsupportedResponse(request_id=request_id)
+            raise APIError(400, "unsupported", "This analysis type is not supported")
 
         # --- Client signature check ---
         # Verify before any heavy work (Azure API calls, AI calls).
@@ -252,7 +250,11 @@ def create_app(
         # final logs to analyze yet, so we return early with a clear message.
         build_status = build_obj.get("status", "")
         if build_status != "completed":
-            return PipelineNotDoneResponse(request_id=request_id)
+            raise APIError(
+                409,
+                "pipeline_not_done",
+                "The pipeline run has not finished yet — please wait until it completes before requesting analysis",
+            )
 
         # --- feat2: pipeline-level in-flight lock ---
         # Prevents two runs of the same pipeline definition from being analyzed

@@ -171,5 +171,5 @@ def test_analyze_stream_unsupported_returns_json_not_sse() -> None:
             json={"message": "azure build pipeline improvement", "data": BUILD_URL, "role": "user", "type": "normal"},
             headers=AUTH,
         )
-    assert response.status_code == 200
-    assert response.json()["answer"] == "unsupported"
+    assert response.status_code == 400
+    assert response.json()["code"] == "unsupported"

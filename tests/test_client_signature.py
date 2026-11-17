@@ -268,7 +268,7 @@ class TestSignatureEnforcementHTTP:
         assert response.headers["X-Request-ID"] == body["request_id"]
 
     def test_unsupported_responses_bypass_signature_check(self):
-        """type=super and improvement message return early before signature check."""
+        """type=super and improvement message return 400 before signature check."""
         app = create_app(_make_settings(require=True), http_transport=httpx.MockTransport(_handler))
         with TestClient(app) as client:
             # type=super — returns before signature check
@@ -283,5 +283,7 @@ class TestSignatureEnforcementHTTP:
                 json={"message": "azure build pipeline improvement", "data": TEST_BUILD_URL, "role": "user", "type": "normal"},
                 headers=AUTH,
             )
-        assert r1.json()["answer"] == "unsupported"
-        assert r2.json()["answer"] == "unsupported"
+        assert r1.status_code == 400
+        assert r1.json()["code"] == "unsupported"
+        assert r2.status_code == 400
+        assert r2.json()["code"] == "unsupported"

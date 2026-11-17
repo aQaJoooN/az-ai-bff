@@ -196,7 +196,7 @@ def _combined_handler(ai_response: dict | None = None, azure_status: int = 200):
 
 
 def test_analyze_returns_pipeline_not_done_when_build_in_progress() -> None:
-    """When the build status is not 'completed', return pipeline_not_done immediately."""
+    """When the build status is not 'completed', return 409 pipeline_not_done."""
     in_progress_build = {
         "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}},
         "status": "inProgress",
@@ -217,8 +217,8 @@ def test_analyze_returns_pipeline_not_done_when_build_in_progress() -> None:
             json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
             headers=AUTH,
         )
-    assert response.status_code == 200
-    assert response.json()["answer"] == "pipeline_not_done"
+    assert response.status_code == 409
+    assert response.json()["code"] == "pipeline_not_done"
     assert "request_id" in response.json()
 
 
@@ -238,8 +238,8 @@ def test_analyze_proceeds_when_build_completed() -> None:
             json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "super"},
             headers=AUTH,
         )
-    assert response.status_code == 200
-    assert response.json()["answer"] == "unsupported"
+    assert response.status_code == 400
+    assert response.json()["code"] == "unsupported"
 
 
 def test_analyze_returns_unsupported_for_improvement_message() -> None:
@@ -249,8 +249,8 @@ def test_analyze_returns_unsupported_for_improvement_message() -> None:
             json={"message": "azure build pipeline improvement", "data": BUILD_URL, "role": "user", "type": "normal"},
             headers=AUTH,
         )
-    assert response.status_code == 200
-    assert response.json()["answer"] == "unsupported"
+    assert response.status_code == 400
+    assert response.json()["code"] == "unsupported"
 
 
 def test_analyze_fetches_logs_and_returns_ai_answer() -> None:
