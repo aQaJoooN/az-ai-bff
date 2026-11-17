@@ -86,6 +86,18 @@ class Settings(BaseSettings):
     # Azure DevOps PAT for fetching build logs (required)
     azure_token: SecretStr
 
+    # MCP agentic tool-use (optional)
+    # mcp_enabled=True  — the AI drives MCP tool calls itself in an agentic
+    #                     loop for every /api/v1/analyze request.
+    #                     mcp_url is required when mcp_enabled is true.
+    # mcp_enabled=False — no MCP involvement; requests handled exactly as
+    #                     before with no behaviour change.
+    # mcp_token         — if set, sent as a Bearer token to the MCP server.
+    #                     Leave blank when the MCP server needs no auth.
+    mcp_enabled: bool = False
+    mcp_url: AnyHttpUrl | None = None
+    mcp_token: OptionalSecret = None
+
     # HTTP timeouts
     connect_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     response_timeout_seconds: float = Field(gt=0, le=600)
@@ -111,10 +123,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_backends(self) -> "Settings":
-        """Ensure backend IDs are unique and multi-AI mode has an enabled backend."""
+        """Ensure backend IDs are unique, multi-AI mode has an enabled backend,
+        and MCP mode has a URL when enabled."""
         backend_ids = [self.backend_id, *(backend.backend_id for backend in self.additional_backends)]
         if len(backend_ids) != len(set(backend_ids)):
             raise ValueError("backend identifiers must be unique")
         if self.multi_ai_enabled and not any(backend.enabled for backend in self.additional_backends):
             raise ValueError("multi-AI mode requires an enabled additional backend")
+        if self.mcp_enabled and not self.mcp_url:
+            raise ValueError("mcp_url is required when mcp_enabled is true")
         return self
