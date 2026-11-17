@@ -325,6 +325,15 @@ def _ai_tool_call_response(tool_name: str, arguments: dict, call_id: str = "tc1"
     }
 
 
+_DEFAULT_SYSTEM_PROMPT = Settings(
+    trusted_proxy_addresses=["127.0.0.1"],
+    backend_url="http://ai.test/chat",
+    backend_model="m",
+    response_timeout_seconds=30,
+    azure_token="tok",
+).analyze_system_prompt
+
+
 def test_agentic_analysis_single_round_no_tool_calls() -> None:
     """AI answers immediately without calling any tools."""
     mcp_call_count = {"n": 0}
@@ -348,6 +357,7 @@ def test_agentic_analysis_single_round_no_tool_calls() -> None:
                     ai_model="test-model",
                     ai_credential="",
                     http_client=ai_client,
+                    system_prompt=_DEFAULT_SYSTEM_PROMPT,
                 )
 
     result = asyncio.run(run())
@@ -386,6 +396,7 @@ def test_agentic_analysis_one_tool_call_then_stop() -> None:
                 ai_model="test-model",
                 ai_credential="",
                 http_client=shared,
+                system_prompt=_DEFAULT_SYSTEM_PROMPT,
             )
 
     result = asyncio.run(run())
@@ -409,6 +420,7 @@ def test_agentic_analysis_raises_on_ai_network_error() -> None:
                 ai_model="test-model",
                 ai_credential="",
                 http_client=shared,
+                system_prompt=_DEFAULT_SYSTEM_PROMPT,
             )
 
     with pytest.raises(AgenticLoopError):
@@ -443,6 +455,7 @@ def test_agentic_analysis_tool_error_does_not_abort_loop() -> None:
                 ai_model="test-model",
                 ai_credential="",
                 http_client=shared,
+                system_prompt=_DEFAULT_SYSTEM_PROMPT,
             )
 
     result = asyncio.run(run())
@@ -473,8 +486,8 @@ def test_analyze_standard_path_unchanged_when_mcp_disabled() -> None:
 
     assert response.status_code == 200
     assert response.json()["answer"] == "standard answer"
-    # Standard path uses the simple backend format — no "tools" key in payload
-    assert "tools" not in json.dumps(ai_payloads)
+    # Standard path uses the simple backend format — no "tools" array key in payload
+    assert not any("tools" in p for p in ai_payloads)
 
 
 # ---------------------------------------------------------------------------

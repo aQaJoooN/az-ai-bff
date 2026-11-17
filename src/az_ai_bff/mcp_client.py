@@ -40,29 +40,6 @@ _ACCEPT = "application/json, text/event-stream"
 # Prevents an infinite loop if the model keeps calling tools without stopping.
 _MAX_ITERATIONS = 10
 
-# System prompt injected as the first message in every agentic analyze call.
-_SYSTEM_PROMPT = (
-    "You are a senior Azure DevOps and CI/CD engineer.\n"
-    "You have access to tools that can query the Azure DevOps server "
-    "for additional context (pipeline YAML, run history, variable groups, "
-    "commits, etc.).\n\n"
-    "The user will give you compacted build logs from one or more failed "
-    "pipeline tasks. Each task section is prefixed with its name "
-    "(=== Task Name ===).\n\n"
-    "Use the available tools to gather whatever context you need to "
-    "diagnose the failure precisely. When you have enough information, "
-    "reply in exactly three sections — no other text outside them:\n\n"
-    "## Problem\n"
-    "State the root cause precisely. Quote the exact error line(s) from "
-    "the log. Explain why that error occurs.\n\n"
-    "## Solution\n"
-    "Numbered, concrete steps to fix it. Include exact commands, file "
-    "paths, config keys, or YAML snippets where applicable. Cover any "
-    "prerequisite changes first.\n\n"
-    "## Summary\n"
-    "One sentence: what broke and how to fix it."
-)
-
 
 class MCPClient:
     """JSON-RPC client for the Azure DevOps MCP server.
@@ -217,6 +194,7 @@ async def run_agentic_analysis(
     ai_model: str,
     ai_credential: str,
     http_client: httpx.AsyncClient,
+    system_prompt: str,
     max_tokens: int | None = None,
 ) -> str:
     """Run the full agentic tool-use loop and return the final answer text.
@@ -241,7 +219,7 @@ async def run_agentic_analysis(
 
     # 2. Initial conversation
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": error_logs},
     ]
 

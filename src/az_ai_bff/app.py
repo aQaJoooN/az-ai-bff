@@ -43,6 +43,37 @@ from az_ai_bff.token_management import TokenManager
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
 
 
+def _build_metadata_block(build_obj: dict, project: str) -> str:
+    """Format key build fields into a human-readable block for the AI prompt.
+
+    Uses only data already present in the build object returned by
+    ``fetch_build_info`` — no extra API calls required.
+    """
+    def _get(path: list[str], fallback: str = "unknown") -> str:
+        node = build_obj
+        for key in path:
+            if not isinstance(node, dict):
+                return fallback
+            node = node.get(key, {})
+        return str(node) if node not in (None, {}, "") else fallback
+
+    lines = [
+        f"Project:       {project}",
+        f"Pipeline:      {_get(['definition', 'name'])}",
+        f"Build number:  {_get(['buildNumber'])}",
+        f"Build result:  {_get(['result'])}",
+        f"Branch:        {_get(['sourceBranch'])}",
+        f"Commit:        {_get(['sourceVersion'])}",
+        f"Repository:    {_get(['repository', 'name'])}",
+        f"Triggered by:  {_get(['requestedFor', 'displayName'])}",
+        f"Reason:        {_get(['reason'])}",
+        f"Queue time:    {_get(['queueTime'])}",
+        f"Start time:    {_get(['startTime'])}",
+        f"Finish time:   {_get(['finishTime'])}",
+    ]
+    return "## Build Context\n" + "\n".join(lines)
+
+
 async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
     """Yield from *inner* and release *slot* when the stream finishes or errors."""
     try:
@@ -286,8 +317,10 @@ def create_app(
             if resolved_settings.mcp_enabled:
                 async with slot:
                     try:
+                        build_meta = _build_metadata_block(build_obj, parsed_url.project)
+                        enriched_logs = f"{build_meta}\n\n## Failed Task Logs\n{error_logs}"
                         answer_text = await run_agentic_analysis(
-                            error_logs=error_logs,
+                            error_logs=enriched_logs,
                             mcp_client=request.app.state.mcp_client,
                             ai_base_url=str(resolved_settings.backend_url),
                             ai_model=resolved_settings.backend_model,
@@ -297,6 +330,7 @@ def create_app(
                                 else ""
                             ),
                             http_client=request.app.state.http_client,
+                            system_prompt=resolved_settings.analyze_system_prompt,
                             max_tokens=resolved_settings.max_tokens,
                         )
                     except AgenticLoopError as exc:
@@ -317,27 +351,16 @@ def create_app(
             # STANDARD PATH  (mcp_enabled = false)
             # Unchanged from original — single AI call with compacted logs.
             # ================================================================
+            build_meta = _build_metadata_block(build_obj, parsed_url.project)
+            user_message = f"{build_meta}\n\n## Failed Task Logs\n{error_logs}"
+
             log_chat_request = ChatRequest(
-                message=error_logs,
+                message=user_message,
                 conversation_id=None,
                 context=[
                     ChatTurn(
                         role="system",
-                        content=(
-                            "You are a senior Azure DevOps and CI/CD engineer. "
-                            "The user will give you compacted build logs from one or more failed pipeline tasks. "
-                            "Each task section is prefixed with its name (=== Task Name ===).\n\n"
-                            "Reply in exactly three sections — no other text outside them:\n\n"
-                            "## Problem\n"
-                            "State the root cause precisely. Quote the exact error line(s) from the log. "
-                            "Explain why that error occurs.\n\n"
-                            "## Solution\n"
-                            "Numbered, concrete steps to fix it. "
-                            "Include exact commands, file paths, config keys, or YAML snippets where applicable. "
-                            "Cover any prerequisite changes first.\n\n"
-                            "## Summary\n"
-                            "One sentence: what broke and how to fix it."
-                        ),
+                        content=resolved_settings.analyze_system_prompt,
                     ),
                 ],
             )
