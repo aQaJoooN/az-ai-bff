@@ -26,7 +26,8 @@ _API_BASE = "https://stageazure.asax.ir/tfs/AsaProjects/967834e8-8a18-4a43-88aa-
 BUILD_DETAIL = {
     "_links": {
         "timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}
-    }
+    },
+    "status": "completed",
 }
 
 TIMELINE = {
@@ -194,7 +195,43 @@ def _combined_handler(ai_response: dict | None = None, azure_status: int = 200):
     return handler
 
 
-def test_analyze_returns_unsupported_for_type_super() -> None:
+def test_analyze_returns_pipeline_not_done_when_build_in_progress() -> None:
+    """When the build status is not 'completed', return pipeline_not_done immediately."""
+    in_progress_build = {
+        "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}},
+        "status": "inProgress",
+        "definition": {"id": 42},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "stageazure" in request.url.host:
+            path = request.url.path
+            if path.endswith("/builds/1116401") and "timeline" not in path and "logs" not in path and "tags" not in path:
+                return httpx.Response(200, json=in_progress_build)
+            return httpx.Response(404)
+        return httpx.Response(200, json={"answer": "should not reach AI"})
+
+    with TestClient(create_app(_make_settings(), http_transport=httpx.MockTransport(handler))) as client:
+        response = client.post(
+            "/api/v1/analyze",
+            json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    assert response.json()["answer"] == "pipeline_not_done"
+    assert "request_id" in response.json()
+
+
+def test_analyze_proceeds_when_build_completed() -> None:
+    """When status is 'completed', analysis runs normally."""
+    with TestClient(create_app(_make_settings(), http_transport=httpx.MockTransport(_combined_handler()))) as client:
+        response = client.post(
+            "/api/v1/analyze",
+            json={"message": "azure build pipeline error", "data": BUILD_URL, "role": "user", "type": "normal"},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    assert response.json()["answer"] != "pipeline_not_done"
     with TestClient(create_app(_make_settings(), http_transport=httpx.MockTransport(_combined_handler()))) as client:
         response = client.post(
             "/api/v1/analyze",

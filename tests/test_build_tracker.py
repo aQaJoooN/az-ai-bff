@@ -32,10 +32,12 @@ _API_BASE = (
 BUILD_DETAIL = {
     "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}},
     "definition": {"id": 42, "name": "MyPipeline"},
+    "status": "completed",
 }
 BUILD_DETAIL_OTHER_PIPELINE = {
     "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/9999/timeline"}},
     "definition": {"id": 99, "name": "OtherPipeline"},
+    "status": "completed",
 }
 TIMELINE = {
     "records": [

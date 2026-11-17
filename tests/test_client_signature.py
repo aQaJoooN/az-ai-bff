@@ -150,6 +150,7 @@ _API_BASE = (
 BUILD_DETAIL = {
     "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}},
     "definition": {"id": 42, "name": "MyPipeline"},
+    "status": "completed",
 }
 TIMELINE = {
     "records": [{

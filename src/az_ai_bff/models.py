@@ -97,6 +97,13 @@ class UnsupportedResponse(APIModel):
     request_id: str
 
 
+class PipelineNotDoneResponse(APIModel):
+    """Returned when the requested build has not finished running yet."""
+    answer: Literal["pipeline_not_done"] = "pipeline_not_done"
+    message: str = "The pipeline run has not finished yet — please wait until it completes before requesting analysis"
+    request_id: str
+
+
 # ---------------------------------------------------------------------------
 # SSE streaming models
 # ---------------------------------------------------------------------------

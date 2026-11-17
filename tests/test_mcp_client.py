@@ -31,6 +31,7 @@ AUTH = {"Authorization": "Bearer secret"}
 _BUILD_DETAIL = {
     "definition": {"id": 42},
     "_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}},
+    "status": "completed",
 }
 _TIMELINE = {
     "records": [

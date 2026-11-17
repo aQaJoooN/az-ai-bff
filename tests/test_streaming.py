@@ -13,7 +13,7 @@ AUTH = {"Authorization": "Bearer extension-secret"}
 BUILD_URL = "https://stageazure.asax.ir/tfs/AsaProjects/967834e8-8a18-4a43-88aa-02bd7f158589/_build/results?buildId=1116401"
 _API_BASE = "https://stageazure.asax.ir/tfs/AsaProjects/967834e8-8a18-4a43-88aa-02bd7f158589/_apis"
 
-BUILD_DETAIL = {"_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}}}
+BUILD_DETAIL = {"_links": {"timeline": {"href": f"{_API_BASE}/build/builds/1116401/timeline"}}, "status": "completed"}
 TIMELINE = {
     "records": [
         {

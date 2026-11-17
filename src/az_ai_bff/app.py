@@ -34,6 +34,7 @@ from az_ai_bff.models import (
     ChatTurn,
     ErrorResponse,
     HealthResponse,
+    PipelineNotDoneResponse,
     UnsupportedResponse,
 )
 from az_ai_bff.security import require_access_credential, verify_client_signature
@@ -151,7 +152,7 @@ def create_app(
 
     @app.post(
         "/api/v1/analyze",
-        response_model=AnalyzeResponse | UnsupportedResponse,
+        response_model=AnalyzeResponse | UnsupportedResponse | PipelineNotDoneResponse,
         responses={
             400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
@@ -169,7 +170,7 @@ def create_app(
         request: Request,
         _: Annotated[None, Depends(require_access_credential)],
         stream: bool = Query(default=False, description="Stream the AI analysis as SSE"),
-    ) -> AnalyzeResponse | UnsupportedResponse | StreamingResponse:
+    ) -> AnalyzeResponse | UnsupportedResponse | PipelineNotDoneResponse | StreamingResponse:
         request_id = request.state.request_id
 
         if analyze_request.type == "super":
@@ -212,6 +213,15 @@ def create_app(
             raise APIError(502, "azure_log_fetch_error", str(exc)) from exc
 
         pipeline_id = str(build_obj.get("definition", {}).get("id", parsed_url.build_id))
+
+        # --- Pipeline completion check ---
+        # Azure DevOps sets status="completed" only when the run has fully
+        # finished (succeeded, failed, canceled, or partiallySucceeded).
+        # Any other status means the run is still in progress — there are no
+        # final logs to analyze yet, so we return early with a clear message.
+        build_status = build_obj.get("status", "")
+        if build_status != "completed":
+            return PipelineNotDoneResponse(request_id=request_id)
 
         # --- feat2: pipeline-level in-flight lock ---
         # Prevents two runs of the same pipeline definition from being analyzed
