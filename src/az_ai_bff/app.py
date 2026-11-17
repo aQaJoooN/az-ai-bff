@@ -21,6 +21,7 @@ from az_ai_bff.backend import AIBackendRegistry
 from az_ai_bff.chat import ChatService
 from az_ai_bff.concurrency import AISemaphore, PipelineInFlightTracker, _Slot
 from az_ai_bff.config import Settings
+from az_ai_bff.mcp_client import AgenticLoopError, MCPClient, run_agentic_analysis
 from az_ai_bff.orchestration import AIOrchestrator
 from az_ai_bff.errors import APIError, install_exception_handlers
 from az_ai_bff.middleware import RequestContextMiddleware
@@ -73,6 +74,19 @@ def create_app(
             app.state.ai_semaphore = AISemaphore(resolved_settings.max_concurrent_ai_requests)
             app.state.pipeline_tracker = PipelineInFlightTracker()
             app.state.started_at = time.monotonic()
+            if resolved_settings.mcp_enabled:
+                mcp_token = (
+                    resolved_settings.mcp_token.get_secret_value()
+                    if resolved_settings.mcp_token
+                    else None
+                )
+                app.state.mcp_client = MCPClient(
+                    http_client=client,
+                    base_url=str(resolved_settings.mcp_url),
+                    token=mcp_token,
+                )
+            else:
+                app.state.mcp_client = None
             yield
 
     app = FastAPI(title="Azure DevOps AI BFF", version="1.0.0", lifespan=lifespan)
@@ -246,6 +260,50 @@ def create_app(
                 },
             )
 
+            # --- feat1: AI concurrency cap ---
+            slot = await request.app.state.ai_semaphore.acquire()
+            if not slot.ok:
+                raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
+
+            # ================================================================
+            # AGENTIC PATH  (mcp_enabled = true)
+            # The AI drives MCP tool calls itself in a loop until it has
+            # enough context to produce the final answer.
+            # Streaming is not supported in agentic mode — the loop requires
+            # complete messages to parse tool_calls.
+            # ================================================================
+            if resolved_settings.mcp_enabled:
+                async with slot:
+                    try:
+                        answer_text = await run_agentic_analysis(
+                            error_logs=error_logs,
+                            mcp_client=request.app.state.mcp_client,
+                            ai_base_url=str(resolved_settings.backend_url),
+                            ai_model=resolved_settings.backend_model,
+                            ai_credential=(
+                                resolved_settings.backend_credential.get_secret_value()
+                                if resolved_settings.backend_credential
+                                else ""
+                            ),
+                            http_client=request.app.state.http_client,
+                            max_tokens=resolved_settings.max_tokens,
+                        )
+                    except AgenticLoopError as exc:
+                        raise APIError(502, "ai_backend_error", str(exc)) from exc
+
+                    request.state.backend_id = resolved_settings.backend_id
+                    await fetcher.mark_analyzed(parsed_url)
+                    return AnalyzeResponse(
+                        answer=answer_text,
+                        backend_id=resolved_settings.backend_id,
+                        request_id=request_id,
+                        already_analyzed=already_analyzed,
+                    )
+
+            # ================================================================
+            # STANDARD PATH  (mcp_enabled = false)
+            # Unchanged from original — single AI call with compacted logs.
+            # ================================================================
             log_chat_request = ChatRequest(
                 message=error_logs,
                 conversation_id=None,
@@ -270,11 +328,6 @@ def create_app(
                     ),
                 ],
             )
-
-            # --- feat1: AI concurrency cap ---
-            slot = await request.app.state.ai_semaphore.acquire()
-            if not slot.ok:
-                raise APIError(429, "rate_limit_exceeded", "Too many concurrent AI requests — try again later")
 
             if stream:
                 # For streaming: inject already_analyzed into the StreamDone event,

@@ -18,6 +18,7 @@ A FastAPI service that sits between the [Azure DevOps Build AI Reviewer](https:/
 | **Token budget** | Optional character-based token estimation with context trimming. |
 | **OpenAI + simple formats** | Works with OpenAI-compatible APIs and custom simple backends. |
 | **Reasoning model support** | `BACKEND_REASONING_MODE=true` for models that answer in `reasoning_content` (DeepSeek, Qwen3, etc.). |
+| **MCP agentic tool-use** | Optional agentic loop where the AI drives calls to an Azure DevOps MCP server to gather pipeline YAML, run history, variable groups, commits, and more before producing its answer. |
 | **Structured JSON logs** | Every request and AI call emits one JSON line with stable fields. |
 
 ---
@@ -253,7 +254,7 @@ All variables are prefixed `AZ_AI_BFF_`. Copy `.env.example` to `.env` and edit.
 | `BACKEND_FORMAT` | `simple` | `simple` or `openai` |
 | `BACKEND_CREDENTIAL` | _(empty)_ | Bearer token forwarded to the AI backend |
 | `BACKEND_ID` | `primary` | Identifier used in logs and responses |
-| `BACKEND_REASONING_MODE` | `false` | Set `true` for models that reply in `reasoning_content` (DeepSeek, Qwen3, etc.) |
+| `BACKEND_REASONING_MODE` | `false` | Set `true` for models that reply in `reasoning_content` (DeepSeek, Qwen3, etc.). **Required for all Qwen3 models** — Qwen3 always returns an empty `content` field and puts its answer in `reasoning_content`. |
 | `MAX_TOKENS` | _(unset)_ | If set, appended as `max_tokens` on every AI request |
 
 ### Concurrency
@@ -281,6 +282,14 @@ The concurrency limit applies globally — `/api/v1/chat` and `/api/v1/analyze` 
 |----------|---------|-------------|
 | `MULTI_AI_ENABLED` | `false` | Fan out to all configured backends in parallel |
 | `ADDITIONAL_BACKENDS` | `[]` | JSON list of `AIBackendSettings` objects |
+
+### MCP Agentic Tool-Use (optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_ENABLED` | `false` | When `true`, the AI drives MCP tool calls itself in an agentic loop for every `/api/v1/analyze` request. When `false`, requests are handled exactly as before with no behaviour change. |
+| `MCP_URL` | _(empty)_ | URL of the Azure DevOps MCP server. Required when `MCP_ENABLED=true`. |
+| `MCP_TOKEN` | _(empty)_ | Bearer token sent to the MCP server. Leave blank when the MCP server needs no authentication. |
 
 ### Server / Network
 
