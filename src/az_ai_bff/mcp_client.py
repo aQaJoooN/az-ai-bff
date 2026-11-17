@@ -320,7 +320,7 @@ async def run_agentic_analysis(
 
                 logger.info(
                     "mcp_tool_call",
-                    extra={"tool": tool_name, "args": str(tool_args)[:200]},
+                    extra={"tool": tool_name, "tool_args": str(tool_args)[:200]},
                 )
 
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
