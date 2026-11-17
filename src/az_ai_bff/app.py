@@ -41,11 +41,15 @@ from az_ai_bff.token_management import TokenManager
 _analyze_logger = logging.getLogger("az_ai_bff.analyze")
 
 
-def _build_metadata_block(build_obj: dict, project: str) -> str:
+def _build_metadata_block(build_obj: dict, project: str, build_id: str, base_url: str) -> str:
     """Format key build fields into a human-readable block for the AI prompt.
 
     Uses only data already present in the build object returned by
     ``fetch_build_info`` — no extra API calls required.
+
+    ``build_id`` and ``base_url`` are included explicitly so that the AI can
+    pass the correct identifiers to MCP tools without having to guess them
+    from other fields.
     """
     def _get(path: list[str], fallback: str = "unknown") -> str:
         node = build_obj
@@ -55,19 +59,32 @@ def _build_metadata_block(build_obj: dict, project: str) -> str:
             node = node.get(key, {})
         return str(node) if node not in (None, {}, "") else fallback
 
+    definition_id = _get(["definition", "id"])
+    project_name = _get(["project", "name"])
+
     lines = [
-        f"Project:       {project}",
-        f"Pipeline:      {_get(['definition', 'name'])}",
-        f"Build number:  {_get(['buildNumber'])}",
-        f"Build result:  {_get(['result'])}",
-        f"Branch:        {_get(['sourceBranch'])}",
-        f"Commit:        {_get(['sourceVersion'])}",
-        f"Repository:    {_get(['repository', 'name'])}",
-        f"Triggered by:  {_get(['requestedFor', 'displayName'])}",
-        f"Reason:        {_get(['reason'])}",
-        f"Queue time:    {_get(['queueTime'])}",
-        f"Start time:    {_get(['startTime'])}",
-        f"Finish time:   {_get(['finishTime'])}",
+        f"Azure DevOps URL:  {base_url}",
+        # projectId accepted by every MCP tool — use the GUID (project arg) as
+        # the authoritative value; also show the human-readable name alongside.
+        f"Project ID (GUID): {project}",
+        f"Project name:      {project_name}",
+        # runId accepted by every MCP pipeline tool (get_pipeline_run,
+        # get_pipeline_run_yaml, get_pipeline_log, pipeline_timeline, etc.)
+        f"Run ID (build ID): {build_id}",
+        # pipelineId accepted by list_pipeline_runs, get_pipeline,
+        # trigger_pipeline, and as an optional guard on most other tools.
+        f"Pipeline ID:       {definition_id}",
+        f"Pipeline name:     {_get(['definition', 'name'])}",
+        f"Build number:      {_get(['buildNumber'])}",
+        f"Build result:      {_get(['result'])}",
+        f"Branch:            {_get(['sourceBranch'])}",
+        f"Commit:            {_get(['sourceVersion'])}",
+        f"Repository:        {_get(['repository', 'name'])}",
+        f"Triggered by:      {_get(['requestedFor', 'displayName'])}",
+        f"Reason:            {_get(['reason'])}",
+        f"Queue time:        {_get(['queueTime'])}",
+        f"Start time:        {_get(['startTime'])}",
+        f"Finish time:       {_get(['finishTime'])}",
     ]
     return "## Build Context\n" + "\n".join(lines)
 
@@ -319,7 +336,7 @@ def create_app(
             if resolved_settings.mcp_enabled:
                 async with slot:
                     try:
-                        build_meta = _build_metadata_block(build_obj, parsed_url.project)
+                        build_meta = _build_metadata_block(build_obj, parsed_url.project, parsed_url.build_id, parsed_url.base_url)
                         enriched_logs = f"{build_meta}\n\n## Failed Task Logs\n{error_logs}"
                         answer_text = await run_agentic_analysis(
                             error_logs=enriched_logs,
@@ -353,7 +370,7 @@ def create_app(
             # STANDARD PATH  (mcp_enabled = false)
             # Unchanged from original — single AI call with compacted logs.
             # ================================================================
-            build_meta = _build_metadata_block(build_obj, parsed_url.project)
+            build_meta = _build_metadata_block(build_obj, parsed_url.project, parsed_url.build_id, parsed_url.base_url)
             user_message = f"{build_meta}\n\n## Failed Task Logs\n{error_logs}"
 
             log_chat_request = ChatRequest(
