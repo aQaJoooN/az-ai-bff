@@ -63,29 +63,10 @@ def _build_metadata_block(build_obj: dict, project: str, build_id: str, base_url
     project_name = _get(["project", "name"])
 
     lines = [
-        "## MCP Tool Parameters",
-        "# Use these exact integer values when calling MCP pipeline tools:",
-        f"#   runId      = {build_id}",
-        f"#   pipelineId = {definition_id}",
-        f"#   projectId  = {project}",
-        "",
-        "## Build Context",
-        f"Azure DevOps URL: {base_url}",
-        f"projectId:        {project}",
-        f"Project name:     {project_name}",
-        f"runId:            {build_id}",
-        f"pipelineId:       {definition_id}",
-        f"Pipeline name:    {_get(['definition', 'name'])}",
-        f"Build number:     {_get(['buildNumber'])}  (display label only — NOT the runId)",
-        f"Build result:     {_get(['result'])}",
-        f"Branch:           {_get(['sourceBranch'])}",
-        f"Commit:           {_get(['sourceVersion'])}",
-        f"Repository:       {_get(['repository', 'name'])}",
-        f"Triggered by:     {_get(['requestedFor', 'displayName'])}",
-        f"Reason:           {_get(['reason'])}",
-        f"Queue time:       {_get(['queueTime'])}",
-        f"Start time:       {_get(['startTime'])}",
-        f"Finish time:      {_get(['finishTime'])}",
+        "CRITICAL: when calling MCP tools use ONLY these exact values — do not infer or shorten any ID:",
+        f'MCP:{{"projectId":"{project}","runId":{build_id},"pipelineId":{definition_id}}}',
+        f"# runId={build_id} ({len(str(build_id))} digits, use all of them)  pipelineId={definition_id} ({len(str(definition_id))} digits, use all of them)",
+        f"project={project_name} pipeline={_get(['definition', 'name'])} result={_get(['result'])} branch={_get(['sourceBranch'])} repo={_get(['repository', 'name'])} commit={_get(['sourceVersion'])[:12]} by={_get(['requestedFor', 'displayName'])} reason={_get(['reason'])}",
     ]
     return "\n".join(lines)
 

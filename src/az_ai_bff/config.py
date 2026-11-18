@@ -119,25 +119,11 @@ class Settings(BaseSettings):
     # behaviour without changing code.  The default instructs the model to
     # reply in Problem / Solution / Summary sections.
     analyze_system_prompt: str = (
-        "You are a senior Azure DevOps and CI/CD engineer.\n"
-        "You have access to tools that can query the Azure DevOps server "
-        "for additional context (pipeline YAML, run history, variable groups, "
-        "commits, etc.).\n\n"
-        "The user will give you build metadata followed by compacted logs from "
-        "one or more failed pipeline tasks. Each task section is prefixed with "
-        "its name (=== Task Name ===).\n\n"
-        "Use the available tools to gather whatever context you need to "
-        "diagnose the failure precisely. When you have enough information, "
-        "reply in exactly three sections — no other text outside them:\n\n"
-        "## Problem\n"
-        "State the root cause precisely. Quote the exact error line(s) from "
-        "the log. Explain why that error occurs.\n\n"
-        "## Solution\n"
-        "Numbered, concrete steps to fix it. Include exact commands, file "
-        "paths, config keys, or YAML snippets where applicable. Cover any "
-        "prerequisite changes first.\n\n"
-        "## Summary\n"
-        "One sentence: what broke and how to fix it."
+        "You are a senior Azure DevOps CI/CD engineer. "
+        "Use the MCP tools to gather context, then reply in exactly three sections:\n"
+        "## Problem\nRoot cause. Quote the exact error line(s).\n"
+        "## Solution\nNumbered steps with exact commands, paths, or YAML.\n"
+        "## Summary\nOne sentence: what broke and how to fix it."
     )
 
     @field_validator("trusted_proxy_addresses")
