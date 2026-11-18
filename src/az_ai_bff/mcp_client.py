@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -46,6 +47,78 @@ _MAX_ITERATIONS = 10
 # in analyze.py) is intentionally NOT applied here because MCP responses may be
 # structured JSON rather than log text.
 _MCP_TOOL_RESULT_CHAR_LIMIT = 20_000
+
+
+# Regex to extract the declared MCP IDs from the metadata header injected by
+# _build_metadata_block.  Example header line:
+#   MCP:{"projectId":"abc","runId":"1238384","pipelineId":"7426"}
+# The IDs are always quoted strings in the prompt (to prevent LLM truncation),
+# but the MCP tool schemas declare runId / pipelineId as integers, so we
+# extract them as strings and coerce to int when correcting tool arguments.
+_MCP_HEADER_RE = re.compile(
+    r'MCP:\{"projectId":"(?P<projectId>[^"]+)"'
+    r',"runId":"(?P<runId>\d+)"'
+    r',"pipelineId":"(?P<pipelineId>\d+)"\}',
+)
+
+
+def _extract_declared_ids(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the {projectId, runId, pipelineId} declared in the first user message.
+
+    Returns an empty dict if the header is absent (e.g. in tests that don't
+    inject the metadata block).
+    """
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content") or ""
+            m = _MCP_HEADER_RE.search(str(content))
+            if m:
+                return {
+                    "projectId": m.group("projectId"),
+                    "runId": int(m.group("runId")),
+                    "pipelineId": int(m.group("pipelineId")),
+                }
+            break
+    return {}
+
+
+def _fix_tool_args(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    declared: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace any truncated or wrong runId / pipelineId in *tool_args*.
+
+    The LLM sometimes truncates large integer IDs (e.g. 1238384 → 1238) even
+    when the prompt says not to.  This guard compares the tool's runId and
+    pipelineId against the values declared in the metadata header and
+    overwrites them if they differ.  It is a no-op when *declared* is empty
+    (no header present) or when the tool does not use those fields.
+    """
+    if not declared:
+        return tool_args
+
+    fixed = dict(tool_args)
+
+    for key in ("runId", "pipelineId"):
+        if key not in fixed:
+            continue
+        expected = declared.get(key)
+        if expected is None:
+            continue
+        if fixed[key] != expected:
+            logger.warning(
+                "mcp_id_corrected",
+                extra={
+                    "tool": tool_name,
+                    "field": key,
+                    "llm_value": fixed[key],
+                    "correct_value": expected,
+                },
+            )
+            fixed[key] = expected
+
+    return fixed
 
 
 class MCPClient:
@@ -230,6 +303,10 @@ async def run_agentic_analysis(
         {"role": "user", "content": error_logs},
     ]
 
+    # Extract the declared MCP IDs from the user message once so we can
+    # correct any truncated values the model passes to tool calls.
+    declared_ids = _extract_declared_ids(messages)
+
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if ai_credential:
         headers["Authorization"] = f"Bearer {ai_credential}"
@@ -332,6 +409,8 @@ async def run_agentic_analysis(
                     "mcp_tool_call",
                     extra={"tool": tool_name, "tool_args": str(tool_args)[:200]},
                 )
+
+                tool_args = _fix_tool_args(tool_name, tool_args, declared_ids)
 
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
 

@@ -63,9 +63,10 @@ def _build_metadata_block(build_obj: dict, project: str, build_id: str, base_url
     project_name = _get(["project", "name"])
 
     lines = [
-        "CRITICAL: when calling MCP tools use ONLY these exact values — do not infer or shorten any ID:",
-        f'MCP:{{"projectId":"{project}","runId":{build_id},"pipelineId":{definition_id}}}',
-        f"# runId={build_id} ({len(str(build_id))} digits, use all of them)  pipelineId={definition_id} ({len(str(definition_id))} digits, use all of them)",
+        "CRITICAL: when calling MCP tools use ONLY these exact values — do not infer, shorten, or modify any ID:",
+        f'MCP:{{"projectId":"{project}","runId":"{build_id}","pipelineId":"{definition_id}"}}',
+        f"# The runId is the string \"{build_id}\" — copy every digit exactly as shown ({len(str(build_id))} digits total).",
+        f"# The pipelineId is the string \"{definition_id}\" — copy every digit exactly as shown ({len(str(definition_id))} digits total).",
         f"project={project_name} pipeline={_get(['definition', 'name'])} result={_get(['result'])} branch={_get(['sourceBranch'])} repo={_get(['repository', 'name'])} commit={_get(['sourceVersion'])[:12]} by={_get(['requestedFor', 'displayName'])} reason={_get(['reason'])}",
     ]
     return "\n".join(lines)
