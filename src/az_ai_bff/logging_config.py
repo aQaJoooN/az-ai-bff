@@ -32,6 +32,27 @@ class JsonFormatter(logging.Formatter):
         "max_concurrent",
         "remaining",
         "pipeline_id",
+        # MCP agentic loop
+        "iteration",
+        "messages",
+        "message_count",
+        "total_chars",
+        "ai_base_url",
+        "model",
+        "tool",
+        "tool_args",
+        "tool_calls",
+        "tool_call_id",
+        "result_chars",
+        "result_preview",
+        "content_chars",
+        "content_preview",
+        "original_chars",
+        "limit",
+        "truncated_chars",
+        "mcp_message",
+        "answer_chars",
+        "iterations",
     )
 
     def format(self, record: logging.LogRecord) -> str:
@@ -48,11 +69,15 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"))
 
 
-def configure_logging() -> None:
-    """Attach the JSON formatter to the root ``az_ai_bff`` logger."""
+def configure_logging(log_level: str = "INFO") -> None:
+    """Attach the JSON formatter to the root ``az_ai_bff`` logger.
+
+    Pass ``log_level="DEBUG"`` (or set ``AZ_AI_BFF_LOG_LEVEL=DEBUG``) to
+    enable full AI backend request and MCP tool result logging.
+    """
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     logger = logging.getLogger("az_ai_bff")
     logger.handlers = [handler]
-    logger.setLevel(logging.INFO)
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     logger.propagate = False

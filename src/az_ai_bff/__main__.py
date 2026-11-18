@@ -7,8 +7,8 @@ from az_ai_bff.logging_config import configure_logging
 
 def main() -> None:
     """Run the service with proxy headers trusted only from configured addresses."""
-    configure_logging()
     settings = Settings()
+    configure_logging(settings.log_level)
     uvicorn.run(
         create_app(settings),
         host=settings.internal_host,

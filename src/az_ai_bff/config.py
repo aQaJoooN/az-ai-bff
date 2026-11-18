@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     #   False — run the analysis and return already_analyzed=true as a warning
     enforce_analyzed_tag: bool = False
 
+    # Logging level.  Set to DEBUG to see the full AI backend request payload
+    # and MCP tool results on every agentic loop iteration.
+    # Valid values: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
     # System prompt sent to the AI for every /api/v1/analyze request.
     # Override via AZ_AI_BFF_ANALYZE_SYSTEM_PROMPT to customise the AI's
     # behaviour without changing code.  The default instructs the model to

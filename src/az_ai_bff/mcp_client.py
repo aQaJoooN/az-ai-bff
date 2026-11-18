@@ -40,6 +40,13 @@ _ACCEPT = "application/json, text/event-stream"
 # Prevents an infinite loop if the model keeps calling tools without stopping.
 _MAX_ITERATIONS = 10
 
+# Hard ceiling on the characters of a single MCP tool result that are sent to
+# the AI.  Keeps individual pipeline data responses from flooding the context
+# window.  Only the tool result text is truncated — log compaction (compact_log
+# in analyze.py) is intentionally NOT applied here because MCP responses may be
+# structured JSON rather than log text.
+_MCP_TOOL_RESULT_CHAR_LIMIT = 20_000
+
 
 class MCPClient:
     """JSON-RPC client for the Azure DevOps MCP server.
@@ -243,6 +250,31 @@ async def run_agentic_analysis(
             extra={"iteration": iteration, "messages": len(messages)},
         )
 
+        # Debug: log the full request payload sent to the AI backend.
+        # Each message is logged individually so very long content is still
+        # readable in structured logs.  Credentials are never included —
+        # only the payload body (messages, tools, model, token limits).
+        logger.debug(
+            "mcp_agentic_request",
+            extra={
+                "iteration": iteration,
+                "ai_base_url": ai_base_url,
+                "model": ai_model,
+                "message_count": len(messages),
+                "total_chars": sum(len(str(m.get("content") or "")) for m in messages),
+                "messages": [
+                    {
+                        "role": m.get("role"),
+                        "content_chars": len(str(m.get("content") or "")),
+                        "content_preview": str(m.get("content") or "")[:500],
+                        "tool_calls": m.get("tool_calls"),
+                        "tool_call_id": m.get("tool_call_id"),
+                    }
+                    for m in messages
+                ],
+            },
+        )
+
         # Call AI backend
         try:
             response = await http_client.post(ai_base_url, json=payload, headers=headers)
@@ -302,6 +334,36 @@ async def run_agentic_analysis(
                 )
 
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
+
+                # Hard-truncate tool results to prevent pipeline data from
+                # flooding the AI context window.  compact_log is NOT applied
+                # here because MCP responses are often structured JSON (not log
+                # text).  A plain character-based cap with a clear note is
+                # sufficient and safe for all MCP response types.
+                if len(tool_result) > _MCP_TOOL_RESULT_CHAR_LIMIT:
+                    truncated_chars = len(tool_result) - _MCP_TOOL_RESULT_CHAR_LIMIT
+                    tool_result = (
+                        tool_result[:_MCP_TOOL_RESULT_CHAR_LIMIT]
+                        + f"\n[... {truncated_chars} characters truncated — only logs are compressed, full pipeline data was truncated to fit context window]"
+                    )
+                    logger.info(
+                        "mcp_tool_result_truncated",
+                        extra={
+                            "tool": tool_name,
+                            "original_chars": len(tool_result),
+                            "limit": _MCP_TOOL_RESULT_CHAR_LIMIT,
+                            "truncated_chars": truncated_chars,
+                        },
+                    )
+
+                logger.debug(
+                    "mcp_tool_result",
+                    extra={
+                        "tool": tool_name,
+                        "result_chars": len(tool_result),
+                        "result_preview": tool_result[:500],
+                    },
+                )
 
                 messages.append(
                     {
