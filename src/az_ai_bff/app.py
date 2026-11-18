@@ -63,30 +63,31 @@ def _build_metadata_block(build_obj: dict, project: str, build_id: str, base_url
     project_name = _get(["project", "name"])
 
     lines = [
-        f"Azure DevOps URL:  {base_url}",
-        # projectId accepted by every MCP tool — use the GUID (project arg) as
-        # the authoritative value; also show the human-readable name alongside.
-        f"Project ID (GUID): {project}",
-        f"Project name:      {project_name}",
-        # runId accepted by every MCP pipeline tool (get_pipeline_run,
-        # get_pipeline_run_yaml, get_pipeline_log, pipeline_timeline, etc.)
-        f"Run ID (build ID): {build_id}",
-        # pipelineId accepted by list_pipeline_runs, get_pipeline,
-        # trigger_pipeline, and as an optional guard on most other tools.
-        f"Pipeline ID:       {definition_id}",
-        f"Pipeline name:     {_get(['definition', 'name'])}",
-        f"Build number:      {_get(['buildNumber'])}",
-        f"Build result:      {_get(['result'])}",
-        f"Branch:            {_get(['sourceBranch'])}",
-        f"Commit:            {_get(['sourceVersion'])}",
-        f"Repository:        {_get(['repository', 'name'])}",
-        f"Triggered by:      {_get(['requestedFor', 'displayName'])}",
-        f"Reason:            {_get(['reason'])}",
-        f"Queue time:        {_get(['queueTime'])}",
-        f"Start time:        {_get(['startTime'])}",
-        f"Finish time:       {_get(['finishTime'])}",
+        "## MCP Tool Parameters",
+        "# Use these exact integer values when calling MCP pipeline tools:",
+        f"#   runId      = {build_id}",
+        f"#   pipelineId = {definition_id}",
+        f"#   projectId  = {project}",
+        "",
+        "## Build Context",
+        f"Azure DevOps URL: {base_url}",
+        f"projectId:        {project}",
+        f"Project name:     {project_name}",
+        f"runId:            {build_id}",
+        f"pipelineId:       {definition_id}",
+        f"Pipeline name:    {_get(['definition', 'name'])}",
+        f"Build number:     {_get(['buildNumber'])}  (display label only — NOT the runId)",
+        f"Build result:     {_get(['result'])}",
+        f"Branch:           {_get(['sourceBranch'])}",
+        f"Commit:           {_get(['sourceVersion'])}",
+        f"Repository:       {_get(['repository', 'name'])}",
+        f"Triggered by:     {_get(['requestedFor', 'displayName'])}",
+        f"Reason:           {_get(['reason'])}",
+        f"Queue time:       {_get(['queueTime'])}",
+        f"Start time:       {_get(['startTime'])}",
+        f"Finish time:      {_get(['finishTime'])}",
     ]
-    return "## Build Context\n" + "\n".join(lines)
+    return "\n".join(lines)
 
 
 async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
