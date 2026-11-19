@@ -90,6 +90,9 @@ class AnalyzeResponse(AIResponse):
     already_analyzed: bool = False
     # ISO-8601 UTC timestamp of when the AI printed the analysis result.
     analyzed_at: str | None = None
+    # Wall-clock seconds from the start of the analyze flow to the finished
+    # answer.  Also rendered as a banner at the top of the analyze page.
+    elapsed_seconds: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +119,9 @@ class StreamDone(BaseModel):
     already_analyzed: bool = False
     # ISO-8601 UTC timestamp of when the AI printed the analysis result.
     analyzed_at: str | None = None
+    # Wall-clock seconds from the start of the analyze flow to the finished
+    # answer.  Also rendered as a banner at the top of the analyze page.
+    elapsed_seconds: float | None = None
 
     def to_sse(self) -> str:
         return f"data: {json.dumps(self.model_dump())}\n\n"

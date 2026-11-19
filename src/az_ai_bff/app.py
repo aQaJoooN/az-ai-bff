@@ -72,6 +72,20 @@ def _build_metadata_block(build_obj: dict, project: str, build_id: str, base_url
     return "\n".join(lines)
 
 
+def _format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration as a short, human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes, remainder = divmod(seconds, 60)
+    return f"{int(minutes)}m {remainder:.2f}s"
+
+
+def _elapsed_banner(elapsed_seconds: float) -> str:
+    """Markdown banner prepended to an analysis answer so the elapsed time of
+    the analyze flow (start -> finish) renders at the top of the analyze page."""
+    return f"**Elapsed:** {_format_elapsed(elapsed_seconds)}\n\n"
+
+
 async def _guarded_stream(slot: _Slot, inner: AsyncIterator[str]) -> AsyncIterator[str]:
     """Yield from *inner* and release *slot* when the stream finishes or errors."""
     try:
@@ -201,6 +215,11 @@ def create_app(
         stream: bool = Query(default=False, description="Stream the AI analysis as SSE"),
     ) -> AnalyzeResponse | StreamingResponse:
         request_id = request.state.request_id
+        # Mark the start of the analyze flow.  The elapsed time (finish - start)
+        # is shown as a banner at the top of the analyze page.  Measured here so
+        # the duration covers the whole request: Azure API calls, log fetching,
+        # and the AI run.  The analysis flows themselves are unchanged.
+        flow_start = time.monotonic()
 
         if analyze_request.type == "super":
             raise APIError(400, "unsupported", "This analysis type is not supported")
@@ -339,14 +358,16 @@ def create_app(
                         raise APIError(502, "ai_backend_error", str(exc)) from exc
 
                     analyzed_at = datetime.now(timezone.utc).isoformat()
+                    elapsed_seconds = round(time.monotonic() - flow_start, 3)
                     request.state.backend_id = resolved_settings.backend_id
                     await fetcher.mark_analyzed(parsed_url)
                     return AnalyzeResponse(
-                        answer=answer_text,
+                        answer=_elapsed_banner(elapsed_seconds) + answer_text,
                         backend_id=resolved_settings.backend_id,
                         request_id=request_id,
                         already_analyzed=already_analyzed,
                         analyzed_at=analyzed_at,
+                        elapsed_seconds=elapsed_seconds,
                     )
 
             # ================================================================
@@ -392,6 +413,7 @@ def create_app(
                                 if event_data.get("type") == "done":
                                     event_data["already_analyzed"] = already_analyzed
                                     event_data["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+                                    event_data["elapsed_seconds"] = round(time.monotonic() - flow_start, 3)
                                     yield f"data: {json.dumps(event_data)}\n\n"
                                     continue
                             except (json.JSONDecodeError, AttributeError):
@@ -418,14 +440,16 @@ def create_app(
             async with slot:
                 ai_response = await request.app.state.chat_service.create_response(log_chat_request, request_id)
                 analyzed_at = datetime.now(timezone.utc).isoformat()
+                elapsed_seconds = round(time.monotonic() - flow_start, 3)
                 request.state.backend_id = ai_response.backend_id
                 await fetcher.mark_analyzed(parsed_url)
                 return AnalyzeResponse(
-                    answer=ai_response.answer,
+                    answer=_elapsed_banner(elapsed_seconds) + ai_response.answer,
                     backend_id=ai_response.backend_id,
                     request_id=request_id,
                     already_analyzed=already_analyzed,
                     analyzed_at=analyzed_at,
+                    elapsed_seconds=elapsed_seconds,
                 )
 
     def custom_openapi() -> dict[str, Any]:

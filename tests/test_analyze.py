@@ -270,8 +270,13 @@ def test_analyze_fetches_logs_and_returns_ai_answer() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "root cause: missing dependency"
-    assert "request_id" in response.json()
+    body = response.json()
+    # The elapsed-time banner is prepended to the answer so it renders at the
+    # top of the analyze page; the underlying AI analysis follows unchanged.
+    assert body["answer"].startswith("**Elapsed:**")
+    assert body["answer"].endswith("root cause: missing dependency")
+    assert isinstance(body["elapsed_seconds"], float)
+    assert "request_id" in body
     # Error log content was sent to the AI backend
     assert ai_payloads
     payload_str = json.dumps(ai_payloads[0])

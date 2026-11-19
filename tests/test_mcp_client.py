@@ -485,7 +485,12 @@ def test_analyze_standard_path_unchanged_when_mcp_disabled() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "standard answer"
+    body = response.json()
+    # The elapsed-time banner is prepended to the answer (new display behaviour);
+    # the underlying analysis content is unchanged.
+    assert body["answer"].startswith("**Elapsed:**")
+    assert body["answer"].endswith("standard answer")
+    assert isinstance(body["elapsed_seconds"], float)
     # Standard path uses the simple backend format — no "tools" array key in payload
     assert not any("tools" in p for p in ai_payloads)
 
